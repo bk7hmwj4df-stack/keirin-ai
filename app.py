@@ -6,7 +6,7 @@ from itertools import permutations
 st.set_page_config(page_title="競輪AI v6", page_icon="🚴")
 
 st.title("🚴 競輪AI v6")
-st.write("従来の予想ロジックを維持し、買い目数だけAIが6〜20点で自動調整します。")
+st.write("従来の予想ロジックを維持し、買い目数だけAIが6〜12点で自動調整します。")
 
 uploaded = st.file_uploader("📁 競輪CSVをアップロード", type=["csv"])
 
@@ -243,6 +243,6 @@ st.success(
 
 st.info(
     "予想ロジックは従来版を維持しています。"
-    "AIが点数だけ6〜20点の範囲で自動調整します。"
+    "AIが点数だけ6〜12点の範囲で自動調整します。"
     "※的中を保証するものではありません。"
 )

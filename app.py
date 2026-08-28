@@ -6,7 +6,7 @@ from itertools import permutations
 st.set_page_config(page_title="競輪AI v6", page_icon="🚴")
 
 st.title("🚴 競輪AI v6")
-st.write("AIが買い目数を自動決定します（最大20点）。")
+st.write("従来の予想ロジックを維持し、買い目数だけAIが6〜20点で自動調整します。")
 
 uploaded = st.file_uploader("📁 競輪CSVをアップロード", type=["csv"])
 
@@ -30,61 +30,65 @@ df["rider"] = df["rider"].astype(str).str.strip()
 df["score"] = pd.to_numeric(df["score"], errors="coerce")
 df = df.dropna(subset=["rider", "score"]).copy()
 
-if len(df) < 3:
-    st.error("3人以上必要です。")
-    st.stop()
-
 for col in ["S", "H", "B", "recent_win_rate"]:
     if col in df.columns:
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
-st.subheader("📊 選手データ")
+if len(df) < 3:
+    st.error("3人以上の選手が必要です。")
+    st.stop()
+
+st.subheader("📊 読み込んだデータ")
 st.dataframe(df, use_container_width=True)
 
-# =========================
-# AI選手評価
-# =========================
-
-def normalize(values):
-    values = np.asarray(values, dtype=float)
-
-    lo = values.min()
-    hi = values.max()
+def normalize(series):
+    x = pd.to_numeric(series, errors="coerce").fillna(0)
+    lo = x.min()
+    hi = x.max()
 
     if hi == lo:
-        return np.ones(len(values)) * 0.5
+        return np.ones(len(x)) * 0.5
 
-    return (values - lo) / (hi - lo)
+    return ((x - lo) / (hi - lo)).to_numpy()
 
+score_n = normalize(df["score"])
 
-score = normalize(df["score"])
+if "S" in df.columns:
+    S_n = normalize(df["S"])
+else:
+    S_n = np.ones(len(df)) * 0.5
 
-S = normalize(df["S"]) if "S" in df.columns else np.ones(len(df)) * 0.5
-H = normalize(df["H"]) if "H" in df.columns else np.ones(len(df)) * 0.5
-B = normalize(df["B"]) if "B" in df.columns else np.ones(len(df)) * 0.5
+if "H" in df.columns:
+    H_n = normalize(df["H"])
+else:
+    H_n = np.ones(len(df)) * 0.5
+
+if "B" in df.columns:
+    B_n = normalize(df["B"])
+else:
+    B_n = np.ones(len(df)) * 0.5
 
 if "recent_win_rate" in df.columns and df["recent_win_rate"].max() > 0:
-    recent = normalize(df["recent_win_rate"])
+    recent_n = normalize(df["recent_win_rate"])
 else:
-    recent = np.ones(len(df)) * 0.5
+    recent_n = np.ones(len(df)) * 0.5
 
 ai_score = (
-    score * 0.55
-    + recent * 0.20
-    + S * 0.10
-    + H * 0.08
-    + B * 0.07
+    score_n * 0.55
+    + recent_n * 0.20
+    + S_n * 0.10
+    + H_n * 0.08
+    + B_n * 0.07
 )
 
-# 1着確率
-x = ai_score * 5
-x = np.exp(x - x.max())
-win_prob = x / x.sum()
+x = ai_score / 1.15
+exp_x = np.exp(x - x.max())
+win_probability = exp_x / exp_x.sum()
 
 result = pd.DataFrame({
     "選手": df["rider"],
     "AIスコア": np.round(ai_score, 3),
-    "1着確率": np.round(win_prob * 100, 2)
+    "1着確率": np.round(win_probability * 100, 2)
 })
 
 result = result.sort_values(
@@ -99,71 +103,92 @@ st.dataframe(
     hide_index=True
 )
 
-# =========================
-# 三連単を全通り計算
-# =========================
-
 riders = df["rider"].tolist()
 
 prob_map = dict(
-    zip(df["rider"], win_prob)
+    zip(df["rider"], win_probability)
 )
+
+base = dict(
+    zip(df["rider"], ai_score)
+)
+
+mn = min(base.values())
+mx = max(base.values())
+span = mx - mn if mx > mn else 1
+
+ability = {}
+
+for rider, value in base.items():
+    ability[rider] = (
+        0.55
+        + 0.45 * ((value - mn) / span)
+    )
 
 tickets = []
 
 for first, second, third in permutations(riders, 3):
 
-    value = (
-        prob_map[first] ** 0.60
-        * prob_map[second] ** 0.25
-        * prob_map[third] ** 0.15
+    model_score = (
+        prob_map[first] ** 0.62
+        * ability[second] ** 0.23
+        * ability[third] ** 0.15
     )
 
     tickets.append({
         "first": first,
         "second": second,
         "third": third,
-        "value": value
+        "score": model_score
     })
 
 tickets.sort(
-    key=lambda x: x["value"],
+    key=lambda x: x["score"],
     reverse=True
 )
 
-# =========================
-# AIが買い目数を自動決定
-# =========================
+total_score = sum(
+    ticket["score"]
+    for ticket in tickets
+)
 
-top = tickets[0]["value"]
+for ticket in tickets:
+    ticket["probability"] = (
+        ticket["score"]
+        / total_score
+        * 100
+    )
 
-second = tickets[1]["value"]
+st.subheader("🔥 AI三連単ランキング")
 
-ratio = second / top if top > 0 else 0
+for i, ticket in enumerate(tickets[:12], 1):
 
-if ratio < 0.55:
-    buy_count = 6
-elif ratio < 0.65:
-    buy_count = 8
-elif ratio < 0.75:
-    buy_count = 10
-elif ratio < 0.85:
-    buy_count = 12
-elif ratio < 0.93:
-    buy_count = 15
-else:
-    buy_count = 18
+    st.write(
+        f"**{i:02d}. "
+        f"{ticket['first']}-"
+        f"{ticket['second']}-"
+        f"{ticket['third']}** "
+        f"{ticket['probability']:.2f}%"
+    )
 
-# 絶対に20点を超えない
-buy_count = min(buy_count, 20)
+# AIが点数だけ自動決定
+relative = (
+    np.array([x["score"] for x in tickets[:20]])
+    / tickets[0]["score"]
+)
+
+buy_count = int(
+    np.sum(relative >= 0.52)
+)
+
+buy_count = max(
+    6,
+    min(20, buy_count)
+)
 
 selected = tickets[:buy_count]
 
-# =========================
-# 最終買い目
-# =========================
-
-st.subheader("🔥 AIが決めた最終買い目")
+st.subheader("💰 AIが決めた最終買い目")
 
 st.success(
     f"AI判断：{buy_count}点"
@@ -172,15 +197,11 @@ st.success(
 for i, ticket in enumerate(selected, 1):
 
     st.write(
-        f"{i}. "
-        f"**{ticket['first']}-"
+        f"{i}. **"
+        f"{ticket['first']}-"
         f"{ticket['second']}-"
         f"{ticket['third']}**"
     )
-
-# =========================
-# フォーメーション
-# =========================
 
 st.subheader("🧩 AIフォーメーション")
 
@@ -189,33 +210,26 @@ groups = {}
 for ticket in selected:
 
     first = ticket["first"]
+    second = ticket["second"]
+    third = ticket["third"]
 
     if first not in groups:
         groups[first] = {}
 
-    second = ticket["second"]
-
     if second not in groups[first]:
         groups[first][second] = []
 
-    groups[first][second].append(
-        ticket["third"]
-    )
+    groups[first][second].append(third)
 
-formation_total = 0
+for first in groups:
 
-for first, seconds in groups.items():
+    for second in groups[first]:
 
-    for second, thirds in seconds.items():
-
-        thirds = list(
-            dict.fromkeys(thirds)
-        )
-
-        formation_total += len(thirds)
+        thirds = groups[first][second]
 
         third_text = "".join(
-            str(x) for x in thirds
+            str(x)
+            for x in thirds
         )
 
         st.write(
@@ -227,10 +241,8 @@ st.success(
     f"最終買い目：{buy_count}点"
 )
 
-st.caption(
-    f"フォーメーション実点数：{formation_total}点"
-)
-
 st.info(
-    "※AIによる参考予想です。的中を保証するものではありません。"
+    "予想ロジックは従来版を維持しています。"
+    "AIが点数だけ6〜20点の範囲で自動調整します。"
+    "※的中を保証するものではありません。"
 )

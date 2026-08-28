@@ -1,12 +1,12 @@
-import itertools
-import numpy as np
-import pandas as pd
 import streamlit as st
+import pandas as pd
+import numpy as np
+from itertools import permutations
 
-st.set_page_config(page_title="競輪AI v4", page_icon="🚴", layout="wide")
+st.set_page_config(page_title="競輪AI v5", layout="wide")
 
-st.title("🚴 競輪AI v4")
-st.write("競輪CSVを読み込み、選手評価→1着確率→三連単210通り→最終12点をフォーメーション化します。")
+st.title("🚴 競輪AI v5")
+st.write("競輪CSVを読み込み、選手評価→1着確率→三連単確率→AI自動点数→フォーメーションを作成します。")
 
 uploaded = st.file_uploader(
     "📁 競輪CSVをアップロード",
@@ -15,197 +15,379 @@ uploaded = st.file_uploader(
 
 if uploaded is None:
     st.info("まず競輪データのCSVをアップロードしてください。")
-    st.write("推奨列：race_id / rider / score / S / H / B / recent_win_rate / style / line")
+    st.write(
+        "推奨列：race_id / rider / score / S / H / B / "
+        "recent_win_rate / style / line"
+    )
     st.stop()
 
+# -----------------------------
+# CSV読み込み
+# -----------------------------
 try:
     df = pd.read_csv(uploaded)
 except Exception as e:
-    st.error(f"CSVを読み込めませんでした: {e}")
+    st.error(f"CSVを読み込めませんでした：{e}")
     st.stop()
+
+# 列名を整える
+df.columns = [str(c).strip() for c in df.columns]
+
+required = ["race_id", "rider", "score"]
+
+missing = [c for c in required if c not in df.columns]
+
+if missing:
+    st.error(
+        "必要な列がありません。\n\n"
+        + "不足している列："
+        + ", ".join(missing)
+    )
+    st.stop()
+
+# 数値列
+numeric_cols = [
+    "score",
+    "S",
+    "H",
+    "B",
+    "recent_win_rate"
+]
+
+for col in numeric_cols:
+    if col in df.columns:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+# riderを文字列として保持
+df["rider"] = df["rider"].astype(str).str.strip()
 
 st.subheader("📊 読み込んだデータ")
 st.dataframe(df, use_container_width=True)
 
-required = ["rider", "score"]
-missing = [c for c in required if c not in df.columns]
-if missing:
-    st.error("必須列がありません: " + ", ".join(missing))
-    st.stop()
+# -----------------------------
+# 数値を0～1に正規化
+# -----------------------------
+def normalize(series):
+    series = pd.to_numeric(series, errors="coerce").fillna(0)
 
-# 数値列を安全に変換
-for c in ["score", "S", "H", "B", "recent_win_rate"]:
-    if c in df.columns:
-        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+    mn = series.min()
+    mx = series.max()
 
-df["rider"] = pd.to_numeric(df["rider"], errors="coerce")
-df = df.dropna(subset=["rider"]).copy()
-df["rider"] = df["rider"].astype(int)
+    if mx == mn:
+        return pd.Series(
+            np.ones(len(series)) * 0.5,
+            index=series.index
+        )
 
-if len(df) < 3:
-    st.error("3人以上の選手データが必要です。")
-    st.stop()
+    return (series - mn) / (mx - mn)
 
-# ---------- 選手評価 ----------
-# 欠損項目があっても動くよう、存在する情報だけを利用
-score = df["score"].astype(float)
-score_z = (score - score.mean()) / (score.std() if score.std() > 0 else 1)
 
-eval_score = score_z.copy()
+# -----------------------------
+# 1レース予想
+# -----------------------------
+def predict_race(race):
 
-if "S" in df.columns:
-    eval_score += (df["S"] - df["S"].mean()) / (df["S"].std() if df["S"].std() > 0 else 1) * 0.10
-if "H" in df.columns:
-    eval_score += (df["H"] - df["H"].mean()) / (df["H"].std() if df["H"].std() > 0 else 1) * 0.12
-if "B" in df.columns:
-    eval_score += (df["B"] - df["B"].mean()) / (df["B"].std() if df["B"].std() > 0 else 1) * 0.10
-if "recent_win_rate" in df.columns and df["recent_win_rate"].max() > 0:
-    rw = df["recent_win_rate"]
-    eval_score += (rw - rw.mean()) / (rw.std() if rw.std() > 0 else 1) * 0.18
+    race = race.copy().reset_index(drop=True)
 
-# softmaxで1着確率
-temperature = 1.15
-x = eval_score / temperature
-p = np.exp(x - x.max())
-p = p / p.sum()
+    # 選手が3人未満なら予想不能
+    if len(race) < 3:
+        return None
 
-prob_df = pd.DataFrame({
-    "rider": df["rider"],
-    "ai_score": eval_score.round(3),
-    "win_probability": (p * 100).round(2)
-}).sort_values("win_probability", ascending=False)
+    # 選手評価
+    base = normalize(race["score"])
 
-st.subheader("🎯 AI 1着確率")
-st.dataframe(prob_df, use_container_width=True)
+    if "S" in race.columns:
+        s = normalize(race["S"])
+    else:
+        s = pd.Series(0.5, index=race.index)
 
-# ---------- 三連単210通り ----------
-riders = df["rider"].tolist()
-prob_map = dict(zip(df["rider"], p))
+    if "H" in race.columns:
+        h = normalize(race["H"])
+    else:
+        h = pd.Series(0.5, index=race.index)
 
-# 2着・3着は1着確率だけでなく、能力差を少し反映したスコア
-base = {int(r): float(s) for r, s in zip(df["rider"], eval_score)}
-mn, mx = min(base.values()), max(base.values())
-span = mx - mn if mx > mn else 1
-ability = {r: 0.55 + 0.45 * ((v - mn) / span) for r, v in base.items()}
+    if "B" in race.columns:
+        b = normalize(race["B"])
+    else:
+        b = pd.Series(0.5, index=race.index)
 
-rows = []
-for a, b, c in itertools.permutations(riders, 3):
-    # 1着確率を強め、2・3着の能力も加味
-    score3 = (
-        prob_map[a] ** 0.62
-        * ability[b] ** 0.23
-        * ability[c] ** 0.15
-    )
-    rows.append((f"{a}-{b}-{c}", a, b, c, score3))
+    if "recent_win_rate" in race.columns:
+        recent = normalize(race["recent_win_rate"])
+    else:
+        recent = pd.Series(0.5, index=race.index)
 
-tri = pd.DataFrame(rows, columns=["bet", "first", "second", "third", "model_score"])
-tri = tri.sort_values("model_score", ascending=False).reset_index(drop=True)
-
-# 正規化した相対確率表示
-tri["probability"] = tri["model_score"] / tri["model_score"].sum() * 100
-
-st.subheader("🔥 AI三連単ランキング")
-for i, r in tri.head(12).iterrows():
-    st.write(f"**{i+1:02d}. {r['bet']}**  {r['probability']:.2f}%")
-
-# ---------- 最終12点 ----------
-top = tri.head(12).copy()
-top_bets = top["bet"].tolist()
-
-st.subheader("💰 最終12点")
-for i, bet in enumerate(top_bets, 1):
-    st.write(f"{i}. **{bet}**")
-
-# ---------- フォーメーション化 ----------
-# 選ばれた12点だけを集合として扱い、余計な買い目を発生させない。
-selected = set((int(r["first"]), int(r["second"]), int(r["third"])) for _, r in top.iterrows())
-
-def contained_rectangle(a_set, b_set, c_set):
-    combos = {(a, b, c) for a in a_set for b in b_set for c in c_set
-              if len({a, b, c}) == 3}
-    return combos and combos.issubset(selected)
-
-def rectangle_key(rect):
-    a, b, c = rect
-    return (
-        tuple(sorted(a)),
-        tuple(sorted(b)),
-        tuple(sorted(c))
+    # AI総合スコア
+    ai_score = (
+        base * 0.55
+        + recent * 0.20
+        + s * 0.10
+        + h * 0.08
+        + b * 0.07
     )
 
-# まず「同じ1着×複数2着×複数3着」の自然なまとまりを探す。
-# 必ず選択済み12点の中だけに収まる組み合わせを採用。
-remaining = set(selected)
-formations = []
+    race["ai_score"] = ai_score
 
-while remaining:
-    best = None
-    best_gain = 0
+    # ソフトマックスで1着確率
+    x = ai_score.to_numpy(dtype=float)
 
-    # 最大4×4程度の小さな集合を探索
-    for first in sorted({x[0] for x in remaining}):
-        seconds = sorted({x[1] for x in remaining if x[0] == first})
-        for second in seconds:
-            thirds = sorted({x[2] for x in remaining if x[0] == first and x[1] == second})
-            # 1着固定・2着複数・3着複数
-            for k2 in range(min(3, len(seconds)), 0, -1):
-                for bset in itertools.combinations(seconds, k2):
-                    for k3 in range(min(4, len(thirds)), 0, -1):
-                        for cset in itertools.combinations(thirds, k3):
-                            rect = {(first, b, c) for b in bset for c in cset
-                                    if len({first, b, c}) == 3}
-                            if rect and rect.issubset(remaining):
-                                gain = len(rect)
-                                if gain > best_gain:
-                                    best_gain = gain
-                                    best = (first, tuple(bset), tuple(cset), rect)
+    temperature = 0.75
 
-    # 次に「1着複数×2着固定×3着固定」のまとまり
-    if best is None:
-        for second in sorted({x[1] for x in remaining}):
-            firsts = sorted({x[0] for x in remaining if x[1] == second})
-            thirds = sorted({x[2] for x in remaining if x[1] == second})
-            for k1 in range(min(3, len(firsts)), 0, -1):
-                for aset in itertools.combinations(firsts, k1):
-                    for k3 in range(min(3, len(thirds)), 0, -1):
-                        for cset in itertools.combinations(thirds, k3):
-                            rect = {(a, second, c) for a in aset for c in cset
-                                    if len({a, second, c}) == 3}
-                            if rect and rect.issubset(remaining) and len(rect) > best_gain:
-                                best_gain = len(rect)
-                                best = (tuple(aset), second, tuple(cset), rect)
+    exp_x = np.exp((x - np.max(x)) / temperature)
 
-    if best is None:
-        x = next(iter(remaining))
-        formations.append(("single", x))
-        remaining.remove(x)
+    probabilities = exp_x / exp_x.sum()
+
+    race["win_probability"] = probabilities
+
+    # AIスコア順
+    race = race.sort_values(
+        "ai_score",
+        ascending=False
+    ).reset_index(drop=True)
+
+    # -------------------------
+    # 三連単全組み合わせ
+    # -------------------------
+    riders = race["rider"].tolist()
+
+    prob_map = dict(
+        zip(
+            race["rider"],
+            race["win_probability"]
+        )
+    )
+
+    # ライン情報
+    line_map = {}
+
+    if "line" in race.columns:
+        for _, row in race.iterrows():
+            line_map[row["rider"]] = str(row["line"])
+
+    tickets = []
+
+    for a, b, c in permutations(riders, 3):
+
+        p = (
+            prob_map[a]
+            * prob_map[b]
+            * prob_map[c]
+        )
+
+        # 同ラインの連携を少し評価
+        bonus = 1.0
+
+        if line_map.get(a, "") != "":
+            if line_map.get(a) == line_map.get(b):
+                bonus *= 1.08
+
+            if line_map.get(b) == line_map.get(c):
+                bonus *= 1.04
+
+        final_p = p * bonus
+
+        tickets.append(
+            {
+                "first": a,
+                "second": b,
+                "third": c,
+                "probability": final_p
+            }
+        )
+
+    tickets = sorted(
+        tickets,
+        key=lambda x: x["probability"],
+        reverse=True
+    )
+
+    # -------------------------
+    # AIが買い目数を自動決定
+    # -------------------------
+    top_prob = tickets[0]["probability"]
+
+    if top_prob >= 0.055:
+        target = 8
+    elif top_prob >= 0.040:
+        target = 10
+    elif top_prob >= 0.030:
+        target = 12
+    elif top_prob >= 0.022:
+        target = 15
     else:
-        formations.append(("rect", best))
-        remaining -= best[3]
+        target = 18
 
-def nums(v):
-    if isinstance(v, tuple):
-        return "".join(str(x) for x in sorted(v))
-    return str(v)
+    # 最大20点
+    target = min(target, 20)
 
-st.subheader("🧩 最終12点をフォーメーション表示")
+    selected = tickets[:target]
 
-formation_points = []
-for item in formations:
-    if item[0] == "single":
-        bet = "-".join(map(str, item[1]))
-        formation_points.append((bet, 1))
-    else:
-        _, a, b, c, rect = item
-        # a/b/cがスカラーまたはtuple
-        aa = nums(a)
-        bb = nums(b)
-        cc = nums(c)
-        formation_points.append((f"{aa}-{bb}-{cc}", len(rect)))
+    # -------------------------
+    # フォーメーション化
+    # -------------------------
+    # 頭ごとにまとめる
+    formation_groups = {}
 
-for bet, count in formation_points:
-    st.write(f"**{bet}**　→ {count}点")
+    for t in selected:
+        first = t["first"]
 
-st.caption(f"フォーメーション合計：{sum(x[1] for x in formation_points)}点（最終12点と一致）")
-st.success("予想完了！")
-st.info("AIは入力データを統計的に評価した参考予想です。的中を保証するものではありません。")
+        if first not in formation_groups:
+            formation_groups[first] = {
+                "seconds": [],
+                "thirds": []
+            }
+
+        if t["second"] not in formation_groups[first]["seconds"]:
+            formation_groups[first]["seconds"].append(
+                t["second"]
+            )
+
+        if t["third"] not in formation_groups[first]["thirds"]:
+            formation_groups[first]["thirds"].append(
+                t["third"]
+            )
+
+    # 頭の表示順
+    first_order = []
+
+    for t in selected:
+        if t["first"] not in first_order:
+            first_order.append(t["first"])
+
+    formations = []
+
+    for first in first_order:
+
+        group = formation_groups[first]
+
+        seconds = [
+            x for x in group["seconds"]
+            if x != first
+        ]
+
+        thirds = [
+            x for x in group["thirds"]
+            if x != first
+        ]
+
+        if len(seconds) == 0 or len(thirds) == 0:
+            continue
+
+        formations.append(
+            {
+                "first": first,
+                "seconds": seconds,
+                "thirds": thirds
+            }
+        )
+
+    return {
+        "race": race,
+        "tickets": selected,
+        "formations": formations,
+        "target": target
+    }
+
+
+# -----------------------------
+# 全レース予想
+# -----------------------------
+st.subheader("🎯 AI予想")
+
+race_ids = df["race_id"].dropna().unique()
+
+for race_id in race_ids:
+
+    race = df[df["race_id"] == race_id].copy()
+
+    result = predict_race(race)
+
+    if result is None:
+        st.warning(
+            f"{race_id}：選手数が少ないため予想できません。"
+        )
+        continue
+
+    race_result = result["race"]
+    selected = result["tickets"]
+    formations = result["formations"]
+
+    st.markdown("---")
+    st.header(f"🏁 {race_id}")
+
+    # -------------------------
+    # 1着確率
+    # -------------------------
+    st.subheader("🎯 AI 1着確率")
+
+    win_table = race_result[
+        [
+            "rider",
+            "ai_score",
+            "win_probability"
+        ]
+    ].copy()
+
+    win_table["ai_score"] = win_table[
+        "ai_score"
+    ].round(3)
+
+    win_table["win_probability"] = (
+        win_table["win_probability"] * 100
+    ).round(2)
+
+    win_table = win_table.rename(
+        columns={
+            "rider": "選手",
+            "ai_score": "AIスコア",
+            "win_probability": "1着確率(%)"
+        }
+    )
+
+    st.dataframe(
+        win_table,
+        use_container_width=True,
+        hide_index=True
+    )
+
+    # -------------------------
+    # フォーメーション
+    # -------------------------
+    st.subheader(
+        f"🔥 AI自動フォーメーション "
+        f"（最大20点・今回は{result['target']}点）"
+    )
+
+    for f in formations:
+
+        first = f["first"]
+        seconds = "".join(f["seconds"])
+        thirds = "".join(f["thirds"])
+
+        st.markdown(
+            f"### **{first}-{seconds}-{thirds}**"
+        )
+
+    # -------------------------
+    # 最終買い目
+    # -------------------------
+    st.subheader("💰 最終買い目")
+
+    for i, t in enumerate(selected, 1):
+
+        percent = t["probability"] * 100
+
+        st.write(
+            f"{i:02d}. "
+            f"**{t['first']}-{t['second']}-{t['third']}** "
+            f"（{percent:.2f}%）"
+        )
+
+    st.success(
+        f"予想完了！ AIが自動で{len(selected)}点に絞りました。"
+    )
+
+st.markdown("---")
+
+st.caption(
+    "※AI予想は入力されたCSVデータを統計的に評価したものです。"
+)

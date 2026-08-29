@@ -1,122 +1,170 @@
 # -*- coding: utf-8 -*-
 import re
+import math
 import streamlit as st
 from itertools import permutations
 
-# ==============================
-# 基本設定
-# ==============================
+# ==================================================
+# 設定
+# ==================================================
 st.set_page_config(
-    page_title="🏇 競馬AIフォーメーション予想",
-    page_icon="🏇",
+    page_title="🐎 競馬AIフォーメーション予想",
+    page_icon="🐎",
     layout="wide"
 )
 
-st.title("🏇 競馬AIフォーメーション予想")
-st.caption(
-    "出馬表の情報を貼り付けるだけで三連単フォーメーションを作成"
-)
+st.title("🐎 競馬AIフォーメーション予想")
+st.caption("競走能力 × 過去戦績 × 調教 × 血統 × 距離適性 × 馬場適性 × 騎手 × 展開")
 
 st.info(
-    "📋 馬番・馬名・オッズ・人気・馬体重・増減・斤量・騎手をコピペして分析できます"
+    "基本データだけでも予想できます。"
+    "過去戦績・調教などを追加すると評価精度を上げられます。"
 )
 
-# ==============================
+# ==================================================
 # 入力
-# ==============================
-col1, col2 = st.columns(2)
+# ==================================================
+
+st.subheader("① 出馬表")
+
+default_horses = """1 ロマンス 68.4 55.0 9
+2 オーパ 209.7 54.0 14
+3 ネイティヴプライド 26.0 57.0 8
+4 ダイヒョウカーク 125.0 57.0 10
+5 プリヴィマーク 184.0 57.0 13
+6 ゴールドプレイヤー 4.0 57.0 3
+7 エターナルホープ 3.7 57.0 2
+8 オウケンサクラコ 17.0 57.0 5
+9 マーゴットライス 22.2 57.0 7
+10 アデルフィー 4.5 57.0 4
+11 スビアーノ 151.2 55.0 11
+12 バターショコラ 173.7 55.0 12
+13 ハチマン 461.4 54.0 15
+14 14番馬 0.0 0.0 0
+15 カシマライフウ 3.6 57.0 1"""
+
+horses_text = st.text_area(
+    "馬データ",
+    value=default_horses,
+    height=430,
+    help="馬番 馬名 単勝オッズ 斤量 人気"
+)
+
+# ==================================================
+# レース条件
+# ==================================================
+
+st.subheader("② レース条件")
+
+col1, col2, col3, col4 = st.columns(4)
 
 with col1:
-
-    st.subheader("🏇 出走馬データ")
-
-    default_data = """1 ロマンス 68.4 9 434 +8 55.0 石橋脩
-2 オーパパ 209.7 14 486 -4 54.0 佐藤翔馬
-3 ネイティヴプライド 26.0 8 482 +4 57.0 松山弘平
-4 ダイヒョウカーク 125.0 10 480 -2 57.0 杉原誠人
-5 プリヴィマーク 184.0 13 444 -4 57.0 武藤雅
-6 ブードオブオナー 4.0 3 526 +12 57.0 津村明秀
-7 ゴールドプレイヤー 3.7 2 444 +2 57.0 古川慎明
-8 エターナルホープ 17.0 5 508 +8 57.0 原優介
-9 オウケンサクラコ 22.2 7 414 +2 57.0 丸田恭介
-10 マーゴットライス 18.0 6 480 +2 57.0 伊坂重信
-11 アデルフィー 4.5 4 448 -4 57.0 三浦皇成
-12 スビアソ 151.2 11 444 -8 55.0 石田拓郎
-13 バターショコラ 173.7 12 458 0 55.0 小林凌也
-14 ハチマン 461.4 15 466 0 54.0 水沼元輝
-15 カシマライフウ 3.6 1 490 0 57.0 大野拓弥"""
-
-    horses_text = st.text_area(
-        "出馬表をコピペ",
-        value=default_data,
-        height=500,
-        help=(
-            "形式：馬番 馬名 単勝オッズ 人気 馬体重 増減 斤量 騎手\n"
-            "例：1 ロマンス 68.4 9 434 +8 55.0 石橋脩"
-        )
+    course = st.selectbox(
+        "競馬場",
+        ["東京", "中山", "阪神", "京都", "中京",
+         "新潟", "福島", "札幌", "函館", "小倉"]
     )
 
 with col2:
-
-    st.subheader("🏁 レース情報")
-
-    race_name = st.text_input(
-        "レース名",
-        value="未入力"
-    )
-
     distance = st.number_input(
         "距離（m）",
         min_value=1000,
-        max_value=4000,
+        max_value=3600,
         value=1600,
         step=100
     )
 
-    track_type = st.selectbox(
-        "コース",
+with col3:
+    surface = st.selectbox(
+        "馬場",
         ["芝", "ダート"]
     )
 
+with col4:
     track_condition = st.selectbox(
         "馬場状態",
         ["良", "稍重", "重", "不良"]
     )
 
-    pace = st.selectbox(
-        "想定ペース",
-        ["スロー", "平均", "ハイ"]
-    )
+# ==================================================
+# 詳細評価入力
+# ==================================================
 
+st.subheader("③ 詳細データ")
+
+st.caption(
+    "各項目は1〜100点。"
+    "分からない馬は空欄のままでOK。"
+)
+
+default_detail = """1 50 50 50 50 50 50 50
+2 40 45 40 45 40 40 45
+3 60 55 60 65 60 55 60
+4 45 50 50 45 50 50 50
+5 40 40 45 40 45 45 45
+6 80 75 70 80 75 85 75
+7 82 80 75 85 80 80 82
+8 68 70 65 70 65 65 70
+9 65 60 65 65 60 65 68
+10 78 75 75 80 75 80 80
+11 45 45 45 50 50 45 45
+12 40 45 45 40 45 40 45
+13 35 35 35 35 35 35 40
+14 50 50 50 50 50 50 50
+15 88 85 82 90 85 90 88"""
+
+details_text = st.text_area(
+    "馬番 過去戦績 調教 血統 距離適性 馬場適性 騎手 展開",
+    value=default_detail,
+    height=430,
+    help=(
+        "例："
+        "6 80 75 70 80 75 85 75"
+    )
+)
+
+# ==================================================
+# 配点設定
+# ==================================================
+
+st.subheader("④ AIの分析比率")
+
+c1, c2, c3, c4 = st.columns(4)
+
+with c1:
+    w_form = st.slider("過去戦績", 0, 30, 20)
+
+with c2:
+    w_training = st.slider("調教", 0, 30, 15)
+
+with c3:
+    w_blood = st.slider("血統", 0, 30, 10)
+
+with c4:
+    w_distance = st.slider("距離適性", 0, 30, 15)
+
+c5, c6, c7, c8 = st.columns(4)
+
+with c5:
+    w_track = st.slider("馬場適性", 0, 30, 10)
+
+with c6:
+    w_jockey = st.slider("騎手", 0, 30, 15)
+
+with c7:
+    w_pace = st.slider("展開", 0, 30, 15)
+
+with c8:
     point_count = st.selectbox(
         "買い目点数",
-        [10, 12, 14, 16, 18, 20],
-        index=2
-    )
-
-    st.divider()
-
-    st.subheader("⚙️ AIモード")
-
-    mode = st.radio(
-        "予想タイプ",
-        [
-            "🔥 本命重視",
-            "⚖️ バランス",
-            "💰 穴狙い"
-        ],
+        [10, 12, 14, 16, 18, 20, 24],
         index=1
     )
 
-    st.caption(
-        "※オッズだけで予想を決めるのではなく、"
-        "人気馬の信頼度と穴馬の期待値を分けて評価します。"
-    )
-
-
-# ==============================
+# ==================================================
 # データ解析
-# ==============================
+# ==================================================
+
 def parse_horses(text):
 
     horses = {}
@@ -130,441 +178,222 @@ def parse_horses(text):
 
         parts = line.split()
 
-        # 最低限：
-        # 馬番 馬名 オッズ 人気
-        if len(parts) < 4:
+        if len(parts) < 5:
             continue
 
         try:
             number = int(parts[0])
+            horse_name = parts[1]
+            odds = float(parts[2])
+            weight = float(parts[3])
+            popularity = int(parts[4])
+
         except:
             continue
 
-        name = parts[1]
-
-        # --------------------------
-        # オッズ
-        # --------------------------
-        try:
-            odds = float(
-                parts[2].replace("倍", "")
-            )
-        except:
-            odds = 999.0
-
-        # --------------------------
-        # 人気
-        # --------------------------
-        try:
-            popularity = int(
-                re.sub(
-                    r"[^\d]",
-                    "",
-                    parts[3]
-                )
-            )
-        except:
-            popularity = 99
-
-        # --------------------------
-        # 馬体重
-        # --------------------------
-        weight = 0
-
-        if len(parts) >= 5:
-            try:
-                weight = int(
-                    re.sub(
-                        r"[^\d]",
-                        "",
-                        parts[4]
-                    )
-                )
-            except:
-                weight = 0
-
-        # --------------------------
-        # 馬体重増減
-        # --------------------------
-        weight_change = 0
-
-        if len(parts) >= 6:
-            try:
-                weight_change = int(
-                    parts[5]
-                )
-            except:
-                weight_change = 0
-
-        # --------------------------
-        # 斤量
-        # --------------------------
-        burden = 57.0
-
-        if len(parts) >= 7:
-            try:
-                burden = float(
-                    parts[6]
-                )
-            except:
-                burden = 57.0
-
-        # --------------------------
-        # 騎手
-        # --------------------------
-        jockey = ""
-
-        if len(parts) >= 8:
-            jockey = " ".join(parts[7:])
-
         horses[number] = {
-
             "number": number,
-            "name": name,
+            "name": horse_name,
             "odds": odds,
-            "popularity": popularity,
             "weight": weight,
-            "weight_change": weight_change,
-            "burden": burden,
-            "jockey": jockey
+            "popularity": popularity
         }
 
     return horses
 
 
-# ==============================
-# 人気評価
-# ==============================
-def popularity_score(popularity):
+def parse_details(text):
 
-    if popularity == 1:
-        return 100
+    details = {}
 
-    elif popularity == 2:
-        return 96
+    for line in text.splitlines():
 
-    elif popularity == 3:
-        return 92
+        line = line.strip()
 
-    elif popularity == 4:
-        return 88
+        if not line:
+            continue
 
-    elif popularity == 5:
-        return 84
+        parts = line.split()
 
-    elif popularity == 6:
-        return 80
+        if len(parts) < 8:
+            continue
 
-    elif popularity == 7:
-        return 76
+        try:
 
-    elif popularity == 8:
-        return 72
+            number = int(parts[0])
 
-    elif popularity == 9:
-        return 68
+            values = list(
+                map(float, parts[1:8])
+            )
 
-    elif popularity == 10:
-        return 64
+            details[number] = {
+                "form": values[0],
+                "training": values[1],
+                "blood": values[2],
+                "distance": values[3],
+                "track": values[4],
+                "jockey": values[5],
+                "pace": values[6]
+            }
 
-    else:
-        return max(
-            40,
-            64 - (popularity - 10) * 4
-        )
+        except:
+            continue
+
+    return details
 
 
-# ==============================
+# ==================================================
 # オッズ評価
-# ==============================
+# ==================================================
+
 def odds_score(odds):
 
-    if odds <= 2:
-        return 100
+    if odds <= 0:
+        return 50
 
-    elif odds <= 3:
-        return 96
+    # オッズが低いほど高評価
+    score = 100 - (
+        math.log(max(odds, 1.01)) * 22
+    )
 
-    elif odds <= 5:
-        return 92
-
-    elif odds <= 10:
-        return 86
-
-    elif odds <= 20:
-        return 78
-
-    elif odds <= 50:
-        return 68
-
-    elif odds <= 100:
-        return 58
-
-    elif odds <= 200:
-        return 48
-
-    else:
-        return 40
+    return max(20, min(100, score))
 
 
-# ==============================
-# 馬体重増減評価
-# ==============================
-def weight_change_score(change):
+# ==================================================
+# 斤量補正
+# ==================================================
 
-    absolute_change = abs(change)
+def weight_score(weight):
 
-    # 大幅な馬体重変化は少し不安
-    if absolute_change == 0:
-        return 100
+    if weight <= 0:
+        return 50
 
-    elif absolute_change <= 4:
-        return 96
+    # 57kgを基準
+    score = 100 - abs(weight - 57.0) * 8
 
-    elif absolute_change <= 8:
-        return 88
-
-    elif absolute_change <= 12:
-        return 76
-
-    else:
-        return 60
+    return max(40, min(100, score))
 
 
-# ==============================
-# 斤量評価
-# ==============================
-def burden_score(burden):
-
-    if burden <= 54:
-        return 100
-
-    elif burden <= 55:
-        return 96
-
-    elif burden <= 56:
-        return 92
-
-    elif burden <= 57:
-        return 88
-
-    else:
-        return 80
-
-
-# ==============================
+# ==================================================
 # 総合評価
-# ==============================
-def calculate_strength(horse, mode):
+# ==================================================
 
-    pop = popularity_score(
-        horse["popularity"]
+def calculate_strengths(
+    horses,
+    details
+):
+
+    strengths = {}
+
+    total_weight = (
+        w_form
+        + w_training
+        + w_blood
+        + w_distance
+        + w_track
+        + w_jockey
+        + w_pace
     )
 
-    odds = odds_score(
-        horse["odds"]
-    )
+    if total_weight == 0:
+        total_weight = 1
 
-    body = weight_change_score(
-        horse["weight_change"]
-    )
+    for number, horse in horses.items():
 
-    burden = burden_score(
-        horse["burden"]
-    )
-
-    # --------------------------
-    # 本命重視
-    # --------------------------
-    if mode == "🔥 本命重視":
-
-        score = (
-            pop * 0.55
-            + odds * 0.25
-            + body * 0.12
-            + burden * 0.08
+        detail = details.get(
+            number,
+            {
+                "form": 50,
+                "training": 50,
+                "blood": 50,
+                "distance": 50,
+                "track": 50,
+                "jockey": 50,
+                "pace": 50
+            }
         )
 
-    # --------------------------
-    # バランス
-    # --------------------------
-    elif mode == "⚖️ バランス":
+        performance_score = (
+            detail["form"] * w_form
+            + detail["training"] * w_training
+            + detail["blood"] * w_blood
+            + detail["distance"] * w_distance
+            + detail["track"] * w_track
+            + detail["jockey"] * w_jockey
+            + detail["pace"] * w_pace
+        ) / total_weight
 
-        score = (
-            pop * 0.40
-            + odds * 0.20
-            + body * 0.25
-            + burden * 0.15
+        odds_component = odds_score(
+            horse["odds"]
         )
 
-        # 人気薄でも馬体重が安定なら少し評価
-        if horse["popularity"] >= 6:
-
-            score += 4
-
-        if horse["popularity"] >= 10:
-
-            score += 3
-
-    # --------------------------
-    # 穴狙い
-    # --------------------------
-    else:
-
-        score = (
-            pop * 0.20
-            + odds * 0.10
-            + body * 0.45
-            + burden * 0.25
+        weight_component = weight_score(
+            horse["weight"]
         )
 
-        # 穴馬補正
-        if 5 <= horse["popularity"] <= 10:
+        # ----------------------------
+        # 最終AIスコア
+        # ----------------------------
 
-            score += 10
+        final_score = (
+            performance_score * 0.80
+            + odds_component * 0.12
+            + weight_component * 0.08
+        )
 
-        elif 11 <= horse["popularity"] <= 14:
+        strengths[number] = {
+            "total": final_score,
+            "performance": performance_score,
+            "detail": detail
+        }
 
-            score += 7
-
-        # 馬体重の安定を評価
-        if abs(
-            horse["weight_change"]
-        ) <= 4:
-
-            score += 5
-
-    return score
-
-
-# ==============================
-# 1着候補スコア
-# ==============================
-def first_score(horse, strength):
-
-    score = strength
-
-    # 上位人気は勝ち切り評価
-    if horse["popularity"] <= 3:
-        score += 10
-
-    elif horse["popularity"] <= 5:
-        score += 5
-
-    # 馬体重大幅変動は少し減点
-    if abs(
-        horse["weight_change"]
-    ) >= 12:
-
-        score -= 8
-
-    return score
+    return strengths
 
 
-# ==============================
-# 三連単作成
-# ==============================
+# ==================================================
+# 三連単候補生成
+# ==================================================
+
 def make_combinations(
     horses,
-    mode,
-    pace,
+    strengths,
     limit
 ):
 
-    strength = {}
-
-    for num, horse in horses.items():
-
-        strength[num] = calculate_strength(
-            horse,
-            mode
-        )
-
     ranked = sorted(
-        strength.keys(),
-        key=lambda x: strength[x],
+        strengths.keys(),
+        key=lambda x: strengths[x]["total"],
         reverse=True
     )
 
-    # --------------------------
-    # 1着候補は上位5頭
-    # --------------------------
-    first_ranked = sorted(
-        horses.keys(),
-        key=lambda x: first_score(
-            horses[x],
-            strength[x]
-        ),
-        reverse=True
-    )
-
-    # --------------------------
-    # 最大8頭を相手候補に
-    # --------------------------
-    main = ranked[:8]
-
-    first_candidates = first_ranked[:4]
+    # 上位7頭を中心
+    main = ranked[:7]
 
     combinations = []
 
-    for a in first_candidates:
+    for a, b, c in permutations(main, 3):
 
-        for b, c in permutations(
-            main,
-            2
-        ):
+        score = (
+            strengths[a]["total"] * 0.50
+            + strengths[b]["total"] * 0.32
+            + strengths[c]["total"] * 0.18
+        )
 
-            # 同じ馬は不可
-            if a == b or a == c:
-                continue
+        # 1着適性
+        score += (
+            strengths[a]["detail"]["pace"]
+            * 0.08
+        )
 
-            # ----------------------
-            # 1着 50%
-            # 2着 32%
-            # 3着 18%
-            # ----------------------
-            combo_score = (
-                first_score(
-                    horses[a],
-                    strength[a]
-                ) * 0.50
-                + strength[b] * 0.32
-                + strength[c] * 0.18
-            )
+        # 騎手能力
+        score += (
+            strengths[b]["detail"]["jockey"]
+            * 0.04
+        )
 
-            # ======================
-            # 本命馬が1着の場合
-            # ======================
-            if horses[a]["popularity"] <= 3:
-
-                combo_score += 8
-
-            # ======================
-            # 中穴の2・3着
-            # ======================
-            if 5 <= horses[b]["popularity"] <= 10:
-
-                combo_score += 4
-
-            if 5 <= horses[c]["popularity"] <= 12:
-
-                combo_score += 3
-
-            # ======================
-            # 大幅馬体重変動を減点
-            # ======================
-            if abs(
-                horses[a]["weight_change"]
-            ) >= 12:
-
-                combo_score -= 10
-
-            combinations.append(
-                (
-                    (a, b, c),
-                    combo_score
-                )
-            )
+        combinations.append(
+            ((a, b, c), score)
+        )
 
     combinations.sort(
         key=lambda x: x[1],
@@ -572,81 +401,79 @@ def make_combinations(
     )
 
     selected = []
-    seen = set()
 
-    # ==========================
-    # 選択
-    # ==========================
     for combo, score in combinations:
 
-        if combo in seen:
-            continue
+        if combo not in selected:
 
-        selected.append(
-            combo
-        )
-
-        seen.add(
-            combo
-        )
+            selected.append(combo)
 
         if len(selected) >= limit:
             break
 
+    return selected, ranked
+
+
+# ==================================================
+# フォーメーション表示
+# ==================================================
+
+def make_formation(combos):
+
+    first = []
+    second = []
+    third = []
+
+    for a, b, c in combos:
+
+        if a not in first:
+            first.append(a)
+
+        if b not in second:
+            second.append(b)
+
+        if c not in third:
+            third.append(c)
+
     return (
-        selected,
-        ranked,
-        strength
+        f"{''.join(map(str, first))}"
+        f"-"
+        f"{''.join(map(str, second))}"
+        f"-"
+        f"{''.join(map(str, third))}"
     )
 
 
-# ==============================
-# フォーメーション圧縮
-# ==============================
-def compress_by_first(combos):
+def compress_combos(combos):
 
     groups = {}
 
     for a, b, c in combos:
 
-        if a not in groups:
-            groups[a] = {}
-
-        if b not in groups[a]:
-            groups[a][b] = []
-
+        groups.setdefault(a, {})
+        groups[a].setdefault(b, [])
         groups[a][b].append(c)
 
-    rows = []
+    result = []
 
     for a in groups:
 
         for b in groups[a]:
 
-            cs = sorted(
-                set(groups[a][b])
+            cs = groups[a][b]
+
+            result.append(
+                f"{a}-{b}-"
+                f"{''.join(map(str, sorted(cs)))}"
             )
 
-            if len(cs) >= 2:
-
-                c_text = "".join(
-                    map(str, cs)
-                )
-
-            else:
-
-                c_text = str(cs[0])
-
-            rows.append(
-                f"{a}-{b}-{c_text}"
-            )
-
-    return rows
+    return result
 
 
-# ==============================
-# AI分析
-# ==============================
+# ==================================================
+# 予想実行
+# ==================================================
+
 if st.button(
     "🔥 AIがガチ分析する",
     use_container_width=True
@@ -656,103 +483,171 @@ if st.button(
         horses_text
     )
 
+    details = parse_details(
+        details_text
+    )
+
     if len(horses) < 3:
 
         st.error(
-            "最低3頭以上の馬データを入力してください。"
+            "最低3頭以上の馬データが必要です。"
         )
 
         st.stop()
 
-    combos, ranked, strength = make_combinations(
+    strengths = calculate_strengths(
         horses,
-        mode,
-        pace,
+        details
+    )
+
+    combos, ranked = make_combinations(
+        horses,
+        strengths,
         point_count
     )
 
     st.success(
-        "🏇 分析完了！"
+        "AI分析完了！"
     )
 
-    # ==========================
-    # 最終フォーメーション
-    # ==========================
+    # ==================================================
+    # 本命
+    # ==================================================
+
     st.divider()
 
     st.subheader(
-        "🎯 最終フォーメーション"
+        "🏆 AI最終フォーメーション"
     )
 
-    compact_rows = compress_by_first(
-        combos
+    st.code(
+        make_formation(combos)
     )
-
-    for row in compact_rows:
-
-        st.code(
-            row
-        )
 
     st.caption(
         f"合計：{len(combos)}点"
     )
 
-    # ==========================
-    # 評価ランキング
-    # ==========================
+    st.divider()
+
+    # ==================================================
+    # 買い目
+    # ==================================================
+
+    st.subheader(
+        "🎯 実際の買い目"
+    )
+
+    for combo in compress_combos(combos):
+
+        st.code(combo)
+
+    # ==================================================
+    # ランキング
+    # ==================================================
+
     st.divider()
 
     st.subheader(
-        "🔥 AI総合評価"
+        "🔥 馬別総合評価"
     )
 
-    for i, num in enumerate(
-        ranked[:8],
+    for rank, number in enumerate(
+        ranked[:10],
         start=1
     ):
 
-        horse = horses[num]
+        horse = horses[number]
+        strength = strengths[number]
 
         st.write(
-            f"**{i}位：{num}番 "
+            f"**{rank}位："
+            f"{number}番 "
             f"{horse['name']}**"
         )
 
         st.write(
-            f"単勝 {horse['odds']:.1f}倍 "
-            f"({horse['popularity']}番人気)｜"
-            f"馬体重 {horse['weight']}kg "
-            f"({horse['weight_change']:+d})｜"
-            f"斤量 {horse['burden']:.1f}kg"
+            f"総合評価："
+            f"**{strength['total']:.1f}点**"
         )
 
-        st.write(
-            f"騎手：{horse['jockey']}｜"
-            f"AI評価：**{strength[num]:.1f}**"
+        st.caption(
+            f"過去戦績 "
+            f"{strength['detail']['form']:.0f} ｜ "
+            f"調教 "
+            f"{strength['detail']['training']:.0f} ｜ "
+            f"血統 "
+            f"{strength['detail']['blood']:.0f} ｜ "
+            f"距離 "
+            f"{strength['detail']['distance']:.0f} ｜ "
+            f"馬場 "
+            f"{strength['detail']['track']:.0f} ｜ "
+            f"騎手 "
+            f"{strength['detail']['jockey']:.0f} ｜ "
+            f"展開 "
+            f"{strength['detail']['pace']:.0f}"
         )
 
-    # ==========================
-    # 買い目一覧
-    # ==========================
+    # ==================================================
+    # 分析
+    # ==================================================
+
     st.divider()
 
     st.subheader(
-        "📋 買い目一覧"
+        "🐎 AI分析条件"
     )
 
-    st.code(
-        "\n".join(
-            f"{a}-{b}-{c}"
-            for a, b, c in combos
-        )
+    st.write(
+        f"競馬場：{course} ｜ "
+        f"距離：{distance}m ｜ "
+        f"{surface} ｜ "
+        f"馬場：{track_condition}"
     )
 
-    # ==========================
-    # 注意
-    # ==========================
     st.warning(
-        "⚠️ 現在は出馬表だけを使う簡易版です。"
-        "過去戦績・調教・血統・距離適性まで追加すると"
-        "さらに本格的なAIになります。"
+        "⚠️ 現在は出馬表に加えて、"
+        "過去戦績・調教・血統・距離適性・馬場適性・"
+        "騎手・展開を評価できる競馬AIです。"
+        "詳細データを正確に入力するほど予想精度が上がります。"
     )
+
+    # ==================================================
+    # 穴馬
+    # ==================================================
+
+    st.divider()
+
+    st.subheader(
+        "💣 AI穴馬候補"
+    )
+
+    longshots = sorted(
+        horses.keys(),
+        key=lambda x: (
+            strengths[x]["total"]
+            / max(horses[x]["popularity"], 1)
+        ),
+        reverse=True
+    )
+
+    shown = 0
+
+    for number in longshots:
+
+        if horses[number]["popularity"] >= 6:
+
+            horse = horses[number]
+
+            st.write(
+                f"💣 {number}番 "
+                f"{horse['name']} "
+                f"｜総合 "
+                f"{strengths[number]['total']:.1f}点 "
+                f"｜{horse['popularity']}番人気"
+            )
+
+            shown += 1
+
+        if shown >= 3:
+            break

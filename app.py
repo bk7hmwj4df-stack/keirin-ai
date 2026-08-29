@@ -3,31 +3,22 @@ import re
 import streamlit as st
 from itertools import permutations
 
+# ==============================
+# 基本設定
+# ==============================
 st.set_page_config(
-    page_title="🚴 競輪AIフォーメーション予想",
-    page_icon="🚴",
+    page_title="🏇 競馬AIフォーメーション予想",
+    page_icon="🏇",
     layout="wide"
 )
 
-# ==============================
-# 見た目
-# ==============================
-st.title("🚴 競輪AIフォーメーション予想")
+st.title("🏇 競馬AIフォーメーション予想")
 st.caption(
-    "無料版｜本線だけでなく、ライン崩れ・先行争いまで想定してフォーメーションを作成"
+    "過去成績・持ち時計・調教・適性・騎手・展開を総合分析して三連単を作成"
 )
 
 st.info(
-    """
-📋 入力した選手データと並びから複数の展開を想定します。
-
-① 本線：ラインが普通に機能
-② 中穴：別ラインの早仕掛け・捲り
-③ 穴：先行争い・ライン崩れ・番手離れ
-
-穴を適当に増やすのではなく、
-「なぜその選手が浮上するか」を展開から評価します。
-"""
+    "📋 馬データを下の形式で貼り付けて分析します。"
 )
 
 # ==============================
@@ -36,53 +27,75 @@ st.info(
 col1, col2 = st.columns(2)
 
 with col1:
-    st.subheader("選手データ")
+    st.subheader("🏇 馬データ")
 
-    default_data = """1 末迫開 102.82 両
-2 幸田望夢 97.00 逃
-3 長尾拳太 106.64 両
-4 柿本大貴 94.32 逃
-5 阪本和也 102.54 追
-6 稲葉一真 92.32 追
-7 橋本瑠偉 98.96 逃
-8 伊藤稔真 93.00 両
-9 野崎将史 97.50 両"""
+    default_data = """1 サンプル馬A 90 88 85 90 80 88
+2 サンプル馬B 95 92 80 85 88 92
+3 サンプル馬C 82 85 95 88 90 80
+4 サンプル馬D 88 90 90 82 85 85
+5 サンプル馬E 80 78 88 92 82 90
+6 サンプル馬F 85 87 82 80 95 88"""
 
-    players_text = st.text_area(
-        "選手データを貼り付け",
+    horses_text = st.text_area(
+        "馬データを貼り付け",
         value=default_data,
-        height=330,
-        help="例：1 末迫開 102.82 両"
+        height=360,
+        help=(
+            "形式：馬番 馬名 過去成績 持ち時計 調教 適性 騎手 展開\n"
+            "例：1 イクイノックス 95 98 92 96 95 90"
+        )
     )
 
 with col2:
-    st.subheader("並び・ライン")
+    st.subheader("⚙️ レース条件")
 
-    default_line = """7-2
-1-9
-8-3-5
-4-6"""
-
-    lines_text = st.text_area(
-        "並びを貼り付け",
-        value=default_line,
-        height=330,
-        help="例：7-2 / 1-9 / 8-3-5 / 4-6"
+    distance = st.number_input(
+        "距離（m）",
+        min_value=1000,
+        max_value=4000,
+        value=1600,
+        step=100
     )
 
-point_count = st.selectbox(
-    "買い目点数",
-    [6, 8, 10, 12, 14, 16, 18, 20],
-    index=4
-)
+    track_type = st.selectbox(
+        "コース",
+        ["芝", "ダート", "障害"]
+    )
+
+    pace = st.selectbox(
+        "想定ペース",
+        ["スロー", "平均", "ハイ"]
+    )
+
+    point_count = st.selectbox(
+        "買い目点数",
+        [10, 12, 14, 16, 18, 20, 24],
+        index=2
+    )
+
+    st.markdown("### 🏇 展開評価")
+
+    st.caption(
+        "展開は馬データの最後の数字で評価します。"
+    )
+
+    st.caption(
+        "スロー＝差し・追い込み不利、先行有利"
+    )
+
+    st.caption(
+        "ハイ＝逃げ・先行不利、差し有利"
+    )
 
 # ==============================
-# 選手データ解析
+# 馬データ解析
 # ==============================
-def parse_players(text):
-    players = {}
+def parse_horses(text):
+
+    horses = {}
 
     for line in text.splitlines():
+
         line = line.strip()
 
         if not line:
@@ -90,7 +103,7 @@ def parse_players(text):
 
         parts = line.split()
 
-        if len(parts) < 3:
+        if len(parts) < 8:
             continue
 
         try:
@@ -98,422 +111,238 @@ def parse_players(text):
         except:
             continue
 
-        score = None
-        style = ""
+        name = parts[1]
 
-        for part in parts:
+        values = []
+
+        for part in parts[2:]:
             try:
-                value = float(part)
-                if 50 <= value <= 130:
-                    score = value
+                values.append(float(part))
             except:
                 pass
 
-            if part in ["逃", "両", "追"]:
-                style = part
+        if len(values) >= 6:
 
-        if score is not None:
-            players[number] = {
+            horses[number] = {
                 "number": number,
-                "score": score,
-                "style": style
+                "name": name,
+
+                "past": values[0],
+                "time": values[1],
+                "training": values[2],
+                "aptitude": values[3],
+                "jockey": values[4],
+                "pace": values[5]
             }
 
-    return players
+    return horses
 
 
 # ==============================
-# ライン解析
+# 総合評価
 # ==============================
-def parse_lines(text):
-    result = []
+def calculate_strength(horse):
 
-    for raw in text.splitlines():
-        raw = raw.strip()
+    # --------------------------
+    # かぁち仕様の評価順
+    #
+    # ① 過去戦績
+    # ② 持ち時計
+    # ③ 調教
+    # ④ 距離・コース適性
+    # ⑤ 騎手
+    # ⑥ 展開
+    #
+    # オッズは使わない
+    # --------------------------
 
-        nums = [int(x) for x in re.findall(r"\d+", raw)]
+    score = (
+        horse["past"] * 0.25
+        + horse["time"] * 0.20
+        + horse["training"] * 0.18
+        + horse["aptitude"] * 0.15
+        + horse["jockey"] * 0.12
+        + horse["pace"] * 0.10
+    )
 
-        if nums:
-            result.append(nums)
+    return score
+
+
+# ==============================
+# 展開補正
+# ==============================
+def apply_pace_bonus(horses, pace):
+
+    result = {}
+
+    for num, horse in horses.items():
+
+        strength = calculate_strength(horse)
+
+        pace_score = horse["pace"]
+
+        # ----------------------
+        # ハイペース
+        # 差し・追込評価が高い馬を優遇
+        # ----------------------
+        if pace == "ハイ":
+
+            if pace_score >= 90:
+                strength += 4.0
+
+            elif pace_score >= 80:
+                strength += 2.0
+
+            elif pace_score < 60:
+                strength -= 2.0
+
+        # ----------------------
+        # スローペース
+        # 前に行ける馬を優遇
+        # ----------------------
+        elif pace == "スロー":
+
+            if pace_score >= 85:
+                strength += 2.0
+
+            elif pace_score < 60:
+                strength -= 1.5
+
+        # ----------------------
+        # 平均ペース
+        # 基本能力重視
+        # ----------------------
+        else:
+
+            if pace_score >= 85:
+                strength += 1.0
+
+        result[num] = strength
 
     return result
 
 
 # ==============================
-# ライン位置取得
+# 三連単スコア
 # ==============================
-def get_line_info(players, lines):
-    info = {}
-
-    for line_index, line in enumerate(lines):
-        for position, num in enumerate(line):
-            info[num] = {
-                "line": line_index,
-                "position": position,
-                "line_length": len(line)
-            }
-
-    return info
-
-
-# ==============================
-# 基礎能力評価
-# ==============================
-def get_base_strength(players, lines):
-    strength = {}
-
-    for num, p in players.items():
-        value = p["score"]
-
-        # 脚質補正
-        if p["style"] == "逃":
-            value += 1.5
-
-        elif p["style"] == "両":
-            value += 1.0
-
-        elif p["style"] == "追":
-            value += 0.5
-
-        strength[num] = value
-
-    return strength
-
-
-# ==============================
-# 本線展開
-# ラインが普通に機能する
-# ==============================
-def get_main_strength(players, lines):
-    strength = get_base_strength(players, lines)
-
-    for line in lines:
-        if not line:
-            continue
-
-        for position, num in enumerate(line):
-            if num not in strength:
-                continue
-
-            # 先頭
-            if position == 0:
-                strength[num] += 3.0
-
-                if players[num]["style"] in ["逃", "両"]:
-                    strength[num] += 2.0
-
-            # 番手
-            elif position == 1:
-                strength[num] += 3.5
-
-            # 3番手以降
-            else:
-                strength[num] += 1.5
-
-        # 長いライン補正
-        if len(line) >= 3:
-            for num in line:
-                if num in strength:
-                    strength[num] += 1.0
-
-    return strength
-
-
-# ==============================
-# 中穴展開
-# 別線の早仕掛け・捲り
-# ==============================
-def get_middle_strength(players, lines):
-    strength = get_base_strength(players, lines)
-
-    for line in lines:
-        if not line:
-            continue
-
-        for position, num in enumerate(line):
-            if num not in strength:
-                continue
-
-            style = players[num]["style"]
-
-            # 先頭の自力型を強化
-            if position == 0:
-
-                if style == "逃":
-                    strength[num] += 4.0
-
-                elif style == "両":
-                    strength[num] += 4.5
-
-            # 番手も残る可能性
-            elif position == 1:
-                strength[num] += 2.5
-
-    return strength
-
-
-# ==============================
-# 穴展開
-# ラインが乱れる・先行争い
-# ==============================
-def get_chaos_strength(players, lines):
-    strength = get_base_strength(players, lines)
-
-    info = get_line_info(players, lines)
-
-    # 自力選手の人数
-    attackers = []
-
-    for num, p in players.items():
-        if p["style"] in ["逃", "両"]:
-            line_info = info.get(num)
-
-            if line_info and line_info["position"] == 0:
-                attackers.append(num)
-
-    many_attackers = len(attackers) >= 3
-
-    for num, p in players.items():
-
-        line_info = info.get(num)
-
-        if not line_info:
-            continue
-
-        position = line_info["position"]
-        line_length = line_info["line_length"]
-        style = p["style"]
-
-        # 先行争いなら後ろが浮上
-        if many_attackers:
-
-            if position == 1:
-                strength[num] += 5.0
-
-            elif position >= 2:
-                strength[num] += 3.5
-
-        # 単騎・短いラインの自力型
-        if line_length <= 2:
-
-            if position == 0 and style == "両":
-                strength[num] += 4.0
-
-            elif position == 0 and style == "逃":
-                strength[num] += 2.0
-
-        # 追込み型の展開拾い
-        if style == "追":
-
-            if position == 1:
-                strength[num] += 2.0
-
-            elif position >= 2:
-                strength[num] += 3.0
-
-    return strength
-
-
-# ==============================
-# 三連単候補作成
-# ==============================
-def generate_scenario_combos(
-    players,
-    lines,
-    strength,
-    scenario,
-    top_count=7
+def make_combinations(
+    horses,
+    pace,
+    limit
 ):
+
+    strength = apply_pace_bonus(
+        horses,
+        pace
+    )
+
     ranked = sorted(
         strength.keys(),
         key=lambda x: strength[x],
         reverse=True
     )
 
-    main = ranked[:top_count]
+    # 上位6頭を中心にする
+    main = ranked[:6]
 
-    combos = []
+    combinations = []
 
     for a, b, c in permutations(main, 3):
 
-        score = (
-            strength[a] * 0.48
-            + strength[b] * 0.32
-            + strength[c] * 0.20
+        # ----------------------
+        # 1着
+        # ----------------------
+        score_a = (
+            strength[a] * 0.50
         )
 
-        # --------------------------
-        # ライン関係
-        # --------------------------
-        for line in lines:
+        # ----------------------
+        # 2着
+        # ----------------------
+        score_b = (
+            strength[b] * 0.32
+        )
 
-            if len(line) < 2:
-                continue
+        # ----------------------
+        # 3着
+        # ----------------------
+        score_c = (
+            strength[c] * 0.18
+        )
 
-            # 同一ラインの順当決着
-            if scenario == "main":
+        combo_score = (
+            score_a
+            + score_b
+            + score_c
+        )
 
-                if a in line and b in line:
-                    if line.index(a) < line.index(b):
-                        score += 2.5
+        # ======================
+        # 1着能力を重視
+        # ======================
 
-                if b in line and c in line:
-                    if line.index(b) < line.index(c):
-                        score += 1.5
+        # 過去戦績
+        combo_score += (
+            horses[a]["past"] * 0.10
+        )
 
-            # 中穴：自力選手からの捲り
-            elif scenario == "middle":
+        # 持ち時計
+        combo_score += (
+            horses[a]["time"] * 0.08
+        )
 
-                if a in line and players[a]["style"] in ["逃", "両"]:
-                    if line.index(a) == 0:
-                        score += 2.5
+        # 調教
+        combo_score += (
+            horses[a]["training"] * 0.07
+        )
 
-                if a in line and b in line:
-                    score += 1.0
+        # ======================
+        # 2・3着は能力差を許容
+        # ======================
 
-            # 穴：ライン崩れ
-            elif scenario == "chaos":
+        combo_score += (
+            horses[b]["past"] * 0.04
+        )
 
-                # 1着と2着を同一ライン固定にしすぎない
-                if a in line and b in line:
-                    score += 0.3
+        combo_score += (
+            horses[c]["past"] * 0.02
+        )
 
-                # 番手・3番手の浮上
-                if b in line and line.index(b) >= 1:
-                    score += 1.8
+        combinations.append(
+            (
+                (a, b, c),
+                combo_score
+            )
+        )
 
-                if c in line and line.index(c) >= 1:
-                    score += 1.2
-
-        combos.append({
-            "ticket": (a, b, c),
-            "score": score,
-            "scenario": scenario
-        })
-
-    combos.sort(
-        key=lambda x: x["score"],
+    combinations.sort(
+        key=lambda x: x[1],
         reverse=True
     )
 
-    return combos
-
-
-# ==============================
-# 最終買い目作成
-# ==============================
-def make_final_combinations(players, lines, limit):
-
-    main_strength = get_main_strength(players, lines)
-    middle_strength = get_middle_strength(players, lines)
-    chaos_strength = get_chaos_strength(players, lines)
-
-    main_combos = generate_scenario_combos(
-        players,
-        lines,
-        main_strength,
-        "main"
-    )
-
-    middle_combos = generate_scenario_combos(
-        players,
-        lines,
-        middle_strength,
-        "middle"
-    )
-
-    chaos_combos = generate_scenario_combos(
-        players,
-        lines,
-        chaos_strength,
-        "chaos"
-    )
-
-    # --------------------------
-    # 点数配分
-    # --------------------------
-    main_count = max(3, round(limit * 0.55))
-    middle_count = max(2, round(limit * 0.30))
-    chaos_count = max(1, limit - main_count - middle_count)
-
+    # ==========================
+    # 上位から選択
+    # ==========================
     selected = []
-    seen = set()
 
-    # 本線
-    for item in main_combos:
-        if len([x for x in selected if x["scenario"] == "main"]) >= main_count:
-            break
+    for combo, score in combinations:
 
-        ticket = item["ticket"]
+        if combo not in selected:
+            selected.append(combo)
 
-        if ticket not in seen:
-            selected.append(item)
-            seen.add(ticket)
-
-    # 中穴
-    for item in middle_combos:
-        if len([x for x in selected if x["scenario"] == "middle"]) >= middle_count:
-            break
-
-        ticket = item["ticket"]
-
-        if ticket not in seen:
-            selected.append(item)
-            seen.add(ticket)
-
-    # 穴
-    for item in chaos_combos:
-        if len([x for x in selected if x["scenario"] == "chaos"]) >= chaos_count:
-            break
-
-        ticket = item["ticket"]
-
-        if ticket not in seen:
-            selected.append(item)
-            seen.add(ticket)
-
-    # 足りない場合
-    all_combos = (
-        main_combos
-        + middle_combos
-        + chaos_combos
-    )
-
-    all_combos.sort(
-        key=lambda x: x["score"],
-        reverse=True
-    )
-
-    for item in all_combos:
         if len(selected) >= limit:
             break
 
-        ticket = item["ticket"]
-
-        if ticket not in seen:
-            selected.append(item)
-            seen.add(ticket)
-
-    # 多すぎる場合
-    selected = selected[:limit]
-
-    return (
-        selected,
-        main_strength,
-        middle_strength,
-        chaos_strength
-    )
+    return selected, ranked, strength
 
 
 # ==============================
 # フォーメーション圧縮
 # ==============================
-def compress_tickets(items):
+def compress_by_first(combos):
 
     groups = {}
 
-    for item in items:
-        a, b, c = item["ticket"]
+    for a, b, c in combos:
 
         if a not in groups:
             groups[a] = {}
@@ -529,240 +358,202 @@ def compress_tickets(items):
 
         for b in groups[a]:
 
-            thirds = sorted(
+            cs = sorted(
                 set(groups[a][b])
             )
 
-            third_text = "".join(
-                str(x) for x in thirds
+            c_text = "".join(
+                str(x)
+                for x in cs
             )
 
             rows.append(
-                f"{a}-{b}-{third_text}"
+                f"{a}-{b}-{c_text}"
             )
 
     return rows
 
 
 # ==============================
-# シナリオ名
+# 普通のフォーメーション作成
 # ==============================
-def scenario_name(scenario):
+def make_simple_formation(combos):
 
-    if scenario == "main":
-        return "本線"
+    first = []
+    second = []
+    third = []
 
-    if scenario == "middle":
-        return "中穴"
+    for a, b, c in combos:
 
-    if scenario == "chaos":
-        return "穴・ライン崩れ"
+        if a not in first:
+            first.append(a)
 
-    return scenario
+        if b not in second:
+            second.append(b)
+
+        if c not in third:
+            third.append(c)
+
+    return (
+        f"{''.join(map(str, first))}"
+        f"-"
+        f"{''.join(map(str, second))}"
+        f"-"
+        f"{''.join(map(str, third))}"
+    )
 
 
 # ==============================
-# 予想
+# AI分析
 # ==============================
 if st.button(
     "🔥 AIがガチ分析する",
-    use_container_width=True,
-    type="primary"
+    use_container_width=True
 ):
 
-    players = parse_players(players_text)
-    lines = parse_lines(lines_text)
+    horses = parse_horses(
+        horses_text
+    )
 
-    if len(players) < 3:
+    if len(horses) < 3:
+
         st.error(
-            "選手データを3人以上入力してください。"
+            "馬データを3頭以上入力してください。"
         )
+
         st.stop()
 
-    if not lines:
-        st.error(
-            "並び・ラインを入力してください。"
-        )
-        st.stop()
-
-    (
-        selected,
-        main_strength,
-        middle_strength,
-        chaos_strength
-    ) = make_final_combinations(
-        players,
-        lines,
+    # ==========================
+    # 分析開始
+    # ==========================
+    combos, ranked, strength = make_combinations(
+        horses,
+        pace,
         point_count
     )
 
-    # ==========================
-    # 総合ランキング
-    # ==========================
-    total_strength = {}
-
-    for num in players:
-        total_strength[num] = (
-            main_strength[num] * 0.55
-            + middle_strength[num] * 0.25
-            + chaos_strength[num] * 0.20
-        )
-
-    ranked = sorted(
-        players.keys(),
-        key=lambda x: total_strength[x],
-        reverse=True
+    st.success(
+        "🏇 分析完了！"
     )
-
-    # ==========================
-    # 表示
-    # ==========================
-    st.success("分析完了！")
 
     st.divider()
-
-    st.header("🎯 AI結論")
-
-    labels = ["◎", "○", "▲", "☆"]
-
-    cols = st.columns(4)
-
-    for i, num in enumerate(ranked[:4]):
-
-        with cols[i]:
-            st.metric(
-                labels[i],
-                f"{num}番",
-                f"{players[num]['score']:.2f}点"
-            )
-
-    st.divider()
-
-    # ==========================
-    # 展開分析
-    # ==========================
-    st.subheader("🚴 想定展開")
-
-    line_texts = [
-        "-".join(map(str, line))
-        for line in lines
-    ]
-
-    st.write(
-        "ライン構成："
-        + " ／ ".join(line_texts)
-    )
-
-    st.write(
-        "① **本線展開**：有力ラインが主導権を取って番手・ライン選手が残る。"
-    )
-
-    st.write(
-        "② **中穴展開**：別線の自力選手が早めに仕掛け、捲りや逆転が発生。"
-    )
-
-    st.write(
-        "③ **穴展開**：複数ラインの先行争いで隊列が乱れ、番手・3番手・別線が浮上。"
-    )
-
-    # ==========================
-    # 穴候補
-    # ==========================
-    chaos_rank = sorted(
-        players.keys(),
-        key=lambda x: chaos_strength[x],
-        reverse=True
-    )
-
-    st.subheader("💥 ライン崩れ時の穴候補")
-
-    hole_candidates = chaos_rank[:4]
-
-    st.write(
-        " → ".join(
-            f"{num}番"
-            for num in hole_candidates
-        )
-    )
-
-    st.caption(
-        "通常展開ではなく、先行争い・番手離れ・隊列の乱れが起きた場合に評価が上がる候補です。"
-    )
 
     # ==========================
     # 最終フォーメーション
     # ==========================
-    st.divider()
-
-    st.header("🎯 最終フォーメーション")
-
-    compact_rows = compress_tickets(selected)
-
-    for row in compact_rows:
-        st.code(row)
-
-    st.success(
-        f"合計：{len(selected)}点"
+    st.subheader(
+        "🎯 最終フォーメーション"
     )
 
-    # ==========================
-    # シナリオ別
-    # ==========================
-    with st.expander("シナリオ別の買い目を見る"):
+    compact_rows = compress_by_first(
+        combos
+    )
 
-        for scenario in ["main", "middle", "chaos"]:
+    for row in compact_rows:
 
-            scenario_items = [
-                x for x in selected
-                if x["scenario"] == scenario
-            ]
+        st.code(
+            row
+        )
 
-            if scenario_items:
+    st.caption(
+        f"合計：{len(combos)}点"
+    )
 
-                st.subheader(
-                    f"【{scenario_name(scenario)}】"
-                )
-
-                for item in scenario_items:
-
-                    a, b, c = item["ticket"]
-
-                    st.write(
-                        f"{a}-{b}-{c}"
-                    )
+    st.divider()
 
     # ==========================
-    # 選手評価
+    # 本命評価
     # ==========================
-    with st.expander("全選手の総合評価を見る"):
+    st.subheader(
+        "🔥 総合評価"
+    )
 
-        for i, num in enumerate(
-            ranked,
-            start=1
-        ):
+    for i, num in enumerate(
+        ranked,
+        start=1
+    ):
 
-            st.write(
-                f"{i}位："
-                f"{num}番 "
-                f"得点 {players[num]['score']:.2f} "
-                f"脚質 {players[num]['style']} "
-                f"総合評価 {total_strength[num]:.1f}"
-            )
+        if i > 6:
+            break
+
+        horse = horses[num]
+
+        st.write(
+            f"**{i}位：{num}番 "
+            f"{horse['name']}**"
+        )
+
+        st.write(
+            f"過去成績 {horse['past']:.0f}｜"
+            f"持ち時計 {horse['time']:.0f}｜"
+            f"調教 {horse['training']:.0f}｜"
+            f"適性 {horse['aptitude']:.0f}｜"
+            f"騎手 {horse['jockey']:.0f}｜"
+            f"展開 {horse['pace']:.0f}"
+        )
+
+        st.write(
+            f"総合評価：**{strength[num]:.1f}**"
+        )
+
+    st.divider()
 
     # ==========================
-    # 買い目確認
+    # 想定展開
     # ==========================
-    with st.expander("実際の全買い目を確認"):
+    st.subheader(
+        "🏇 想定展開"
+    )
 
-        for item in selected:
+    st.write(
+        f"距離：{distance}m"
+    )
 
-            a, b, c = item["ticket"]
+    st.write(
+        f"コース：{track_type}"
+    )
 
-            st.write(
-                f"{a}-{b}-{c}"
-                f"（{scenario_name(item['scenario'])}）"
-            )
+    st.write(
+        f"想定ペース：{pace}"
+    )
+
+    if pace == "ハイ":
+
+        st.write(
+            "前半から速くなり、"
+            "差し・追い込み評価が高い馬を優遇。"
+        )
+
+    elif pace == "スロー":
+
+        st.write(
+            "前半が落ち着き、"
+            "前に行ける馬を優遇。"
+        )
+
+    else:
+
+        st.write(
+            "能力比較を中心に評価。"
+        )
+
+    st.divider()
+
+    # ==========================
+    # 買い目一覧
+    # ==========================
+    st.subheader(
+        "📋 買い目一覧（確認用）"
+    )
+
+    st.code(
+        "\n".join(
+            f"{a}-{b}-{c}"
+            for a, b, c in combos
+        )
+    )
 
     st.warning(
-        "※無料版は入力された競走得点・脚質・ライン構成から展開をシミュレーションするロジックです。"
+        "※オッズを予想の順位決定には使用しません。"
+        "オッズは買い目の厚さや期待値確認に使う前提です。"
     )

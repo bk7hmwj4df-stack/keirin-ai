@@ -1,215 +1,903 @@
 import itertools
+import re
 import numpy as np
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="競輪AI v5", page_icon="🚴", layout="wide")
+st.set_page_config(
+    page_title="競輪AI v6",
+    page_icon="🚴",
+    layout="wide"
+)
 
-st.title("🚴 競輪AI v5")
-st.write("選手評価 → 展開考慮 → 三連単評価 → 自信度に応じて6〜12点 → 自然なフォーメーション化")
+st.title("🚴 競輪AI v6 総合データ分析型")
+st.caption(
+    "競走得点・戦績・脚質・S/H/B・勝率・連対率・並び・ライン・展開など、"
+    "CSVに存在するデータをできるだけ総合評価します"
+)
 
-uploaded = st.file_uploader("📁 競輪CSVをアップロード", type=["csv"])
+uploaded = st.file_uploader(
+    "📁 競輪CSVをアップロード",
+    type=["csv"]
+)
 
 if uploaded is None:
-    st.info("まず競輪データのCSVをアップロードしてください。")
-    st.write("必須列：rider / score")
-    st.write("任意列：S / H / B / recent_win_rate / style / line")
+    st.info("競輪CSVをアップロードしてください。")
     st.stop()
+
+
+# ==================================================
+# CSV読み込み
+# ==================================================
 
 try:
     df = pd.read_csv(uploaded)
+except UnicodeDecodeError:
+    try:
+        df = pd.read_csv(uploaded, encoding="shift_jis")
+    except Exception as e:
+        st.error(f"CSVを読み込めませんでした: {e}")
+        st.stop()
 except Exception as e:
     st.error(f"CSVを読み込めませんでした: {e}")
     st.stop()
 
-required = ["rider", "score"]
-missing = [c for c in required if c not in df.columns]
 
-if missing:
-    st.error("必須列がありません: " + ", ".join(missing))
+df.columns = [
+    str(c).strip().lower()
+    for c in df.columns
+]
+
+
+# ==================================================
+# 必須列確認
+# ==================================================
+
+if "rider" not in df.columns:
+    st.error("rider列が必要です。")
     st.stop()
 
 
-# ==============================
-# データ整形
-# ==============================
+df["rider"] = pd.to_numeric(
+    df["rider"],
+    errors="coerce"
+)
 
-for c in ["score", "S", "H", "B", "recent_win_rate"]:
-    if c in df.columns:
-        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+df = df.dropna(
+    subset=["rider"]
+).copy()
 
-df["rider"] = pd.to_numeric(df["rider"], errors="coerce")
-df = df.dropna(subset=["rider"]).copy()
 df["rider"] = df["rider"].astype(int)
 
+
 if len(df) < 3:
-    st.error("3人以上の選手データが必要です。")
+    st.error("3人以上必要です。")
     st.stop()
+
 
 if df["rider"].duplicated().any():
-    st.error("rider列に重複があります。車番は1人につき1つにしてください。")
+    st.error("rider列に重複があります。")
     st.stop()
 
 
-st.subheader("📊 読み込んだデータ")
-st.dataframe(df, use_container_width=True)
+# ==================================================
+# 数値データを自動検出
+#
+# CSVにある数値データをできるだけ評価に使う
+# ==================================================
+
+numeric_cols = []
+
+for col in df.columns:
+
+    if col in ["index", "race_id", "rider"]:
+        continue
+
+    converted = pd.to_numeric(
+        df[col],
+        errors="coerce"
+    )
+
+    valid_rate = converted.notna().mean()
+
+    if valid_rate >= 0.5:
+        df[col] = converted.fillna(
+            converted.median()
+            if converted.notna().any()
+            else 0
+        )
+
+        numeric_cols.append(col)
 
 
-# ==============================
+# ==================================================
+# 文字列を自動で使えるようにする
+# ==================================================
+
+for col in df.columns:
+
+    if col in numeric_cols:
+        continue
+
+    if col in [
+        "index",
+        "race_id",
+        "rider"
+    ]:
+        continue
+
+    df[col] = df[col].astype(str)
+
+
+# ==================================================
 # Zスコア
-# ==============================
+# ==================================================
 
-def zscore(s):
-    std = s.std()
+def zscore(series):
 
-    if pd.isna(std) or std == 0:
-        return pd.Series(np.zeros(len(s)), index=s.index)
+    series = pd.to_numeric(
+        series,
+        errors="coerce"
+    ).fillna(0)
 
-    return (s - s.mean()) / std
+    std = series.std()
+
+    if (
+        pd.isna(std)
+        or std == 0
+    ):
+        return pd.Series(
+            np.zeros(len(series)),
+            index=series.index
+        )
+
+    return (
+        series - series.mean()
+    ) / std
 
 
-# ==============================
-# 選手能力評価
-# ==============================
+# ==================================================
+# 数値データ評価
+#
+# 列名に応じて重要度を自動設定
+# ==================================================
 
-eval_score = zscore(df["score"]).astype(float)
+eval_score = pd.Series(
+    np.zeros(len(df)),
+    index=df.index
+)
 
-if "S" in df.columns:
-    eval_score += zscore(df["S"]) * 0.08
 
-if "H" in df.columns:
-    eval_score += zscore(df["H"]) * 0.10
+weights_used = {}
 
-if "B" in df.columns:
-    eval_score += zscore(df["B"]) * 0.08
 
-if "recent_win_rate" in df.columns:
-    if df["recent_win_rate"].max() > 0:
-        eval_score += zscore(df["recent_win_rate"]) * 0.18
+def add_score(
+    column,
+    weight
+):
+
+    global eval_score
+
+    if column in df.columns:
+
+        values = pd.to_numeric(
+            df[column],
+            errors="coerce"
+        ).fillna(0)
+
+        if values.std() > 0:
+
+            eval_score += (
+                zscore(values)
+                * weight
+            )
+
+            weights_used[column] = weight
+
+
+# --------------------------------------------------
+# 競走得点
+# --------------------------------------------------
+
+for col in [
+    "score",
+    "rating",
+    "race_score",
+    "competition_score",
+    "points"
+]:
+    add_score(col, 1.00)
+
+
+# --------------------------------------------------
+# 1着率・勝率
+# --------------------------------------------------
+
+for col in [
+    "win_rate",
+    "recent_win_rate",
+    "win",
+    "first_rate",
+    "1st_rate"
+]:
+    add_score(col, 0.70)
+
+
+# --------------------------------------------------
+# 連対率
+# --------------------------------------------------
+
+for col in [
+    "place_rate",
+    "quinella_rate",
+    "top2_rate",
+    "second_rate",
+    "連対率"
+]:
+    add_score(col, 0.55)
+
+
+# --------------------------------------------------
+# 3連対率
+# --------------------------------------------------
+
+for col in [
+    "top3_rate",
+    "third_rate",
+    "place3_rate",
+    "三連対率"
+]:
+    add_score(col, 0.40)
+
+
+# --------------------------------------------------
+# 直近成績
+# 数字が高い方が良いデータを想定
+# --------------------------------------------------
+
+for col in [
+    "recent_score",
+    "form",
+    "recent_form",
+    "momentum",
+    "trend"
+]:
+    add_score(col, 0.45)
+
+
+# --------------------------------------------------
+# S
+# --------------------------------------------------
+
+for col in [
+    "s",
+    "st",
+    "starts"
+]:
+    add_score(col, 0.08)
+
+
+# --------------------------------------------------
+# H
+# --------------------------------------------------
+
+for col in [
+    "h",
+    "heikou"
+]:
+    add_score(col, 0.08)
+
+
+# --------------------------------------------------
+# B
+# --------------------------------------------------
+
+for col in [
+    "b",
+    "back",
+    "breakaway"
+]:
+    add_score(col, 0.12)
+
+
+# --------------------------------------------------
+# 決まり手
+# --------------------------------------------------
+
+for col in [
+    "escape",
+    "nige",
+    "逃げ"
+]:
+    add_score(col, 0.18)
+
+
+for col in [
+    "makuri",
+    "捲り"
+]:
+    add_score(col, 0.18)
+
+
+for col in [
+    "sashi",
+    "差し"
+]:
+    add_score(col, 0.14)
+
+
+for col in [
+    "mark",
+    "マーク"
+]:
+    add_score(col, 0.10)
+
+
+# --------------------------------------------------
+# その他の数値データ
+#
+# 上で使われていないものも少し評価
+# --------------------------------------------------
+
+for col in numeric_cols:
+
+    if col not in weights_used:
+
+        values = pd.to_numeric(
+            df[col],
+            errors="coerce"
+        ).fillna(0)
+
+        if values.std() > 0:
+
+            eval_score += (
+                zscore(values)
+                * 0.05
+            )
+
+            weights_used[col] = 0.05
+
+
+# ==================================================
+# 着順系データ
+#
+# 数字が小さいほど良い場合は逆評価
+# ==================================================
+
+lower_is_better_cols = [
+
+    "average_finish",
+    "avg_finish",
+    "recent_rank",
+    "rank",
+    "着順",
+    "平均着順"
+
+]
+
+
+for col in lower_is_better_cols:
+
+    if col in df.columns:
+
+        values = pd.to_numeric(
+            df[col],
+            errors="coerce"
+        ).fillna(
+            df[col].median()
+        )
+
+        if values.std() > 0:
+
+            eval_score += (
+                -zscore(values)
+                * 0.45
+            )
+
+            weights_used[col] = -0.45
+
+
+# ==================================================
+# ライン解析
+# ==================================================
+
+line_map = {}
+
+if "line" in df.columns:
+
+    for _, row in df.iterrows():
+
+        rider = int(row["rider"])
+
+        line_text = str(
+            row["line"]
+        ).strip()
+
+        nums = re.findall(
+            r"\d+",
+            line_text
+        )
+
+        nums = [
+            int(x)
+            for x in nums
+        ]
+
+        if rider not in nums:
+            nums.insert(
+                0,
+                rider
+            )
+
+        line_map[rider] = nums
+
+
+# --------------------------------------------------
+# 同じラインの人数
+# --------------------------------------------------
+
+line_size = {}
+
+for rider in df["rider"]:
+
+    if rider in line_map:
+
+        line_size[rider] = len(
+            line_map[rider]
+        )
+
+    else:
+
+        line_size[rider] = 1
+
+
+# ==================================================
+# 脚質解析
+# ==================================================
+
+style_map = {}
+
+if "style" in df.columns:
+
+    for _, row in df.iterrows():
+
+        style_map[
+            int(row["rider"])
+        ] = str(
+            row["style"]
+        ).strip()
+
+
+# ==================================================
+# ライン・脚質ボーナス
+# ==================================================
+
+riders = df["rider"].tolist()
+
+for rider in riders:
+
+    idx = df[
+        df["rider"] == rider
+    ].index[0]
+
+    style = style_map.get(
+        rider,
+        ""
+    )
+
+    size = line_size.get(
+        rider,
+        1
+    )
+
+
+    # ライン人数
+    if size >= 3:
+
+        eval_score.loc[idx] += 0.10
+
+    elif size == 2:
+
+        eval_score.loc[idx] += 0.04
+
+
+    # 脚質
+    if style in [
+        "逃",
+        "逃げ"
+    ]:
+
+        if size >= 2:
+            eval_score.loc[idx] += 0.08
+
+    elif style in [
+        "追",
+        "追込"
+    ]:
+
+        if size >= 2:
+            eval_score.loc[idx] += 0.07
+
 
 df["ai_eval"] = eval_score
 
 
-# ==============================
-# 1着確率
-# ==============================
+# ==================================================
+# 1着能力
+# ==================================================
 
-temperature = 1.25
+temperature = 1.35
 
 x = eval_score / temperature
-p = np.exp(x - x.max())
+
+p = np.exp(
+    x - x.max()
+)
+
 p = p / p.sum()
 
-riders = df["rider"].tolist()
 
-prob_map = dict(zip(df["rider"], p))
-eval_map = dict(zip(df["rider"], eval_score))
-
-
-prob_df = pd.DataFrame({
-    "rider": riders,
-    "ai_score": [eval_map[r] for r in riders],
-    "win_probability": [prob_map[r] * 100 for r in riders]
-})
-
-prob_df = prob_df.sort_values(
-    "win_probability",
-    ascending=False
-).reset_index(drop=True)
-
-
-st.subheader("🎯 AI 1着確率")
-
-st.dataframe(
-    prob_df.style.format({
-        "ai_score": "{:.3f}",
-        "win_probability": "{:.2f}%"
-    }),
-    use_container_width=True
+prob_map = dict(
+    zip(
+        df["rider"],
+        p
+    )
 )
 
 
-# ==============================
-# 能力値を0〜1に正規化
-# ==============================
+eval_map = dict(
+    zip(
+        df["rider"],
+        eval_score
+    )
+)
 
-mn = min(eval_map.values())
-mx = max(eval_map.values())
 
-span = mx - mn if mx > mn else 1.0
+# ==================================================
+# ライン先頭判定
+# ==================================================
 
-ability = {
-    r: 0.25 + 0.75 * ((eval_map[r] - mn) / span)
-    for r in riders
+line_front = {}
+
+for rider in riders:
+
+    if rider in line_map:
+
+        nums = line_map[rider]
+
+        if len(nums) > 0:
+
+            line_front[rider] = nums[0]
+
+    else:
+
+        line_front[rider] = rider
+
+
+# ==================================================
+# 各選手の役割を自動判定
+# ==================================================
+
+role_score = {}
+
+for rider in riders:
+
+    score = 0
+
+    style = style_map.get(
+        rider,
+        ""
+    )
+
+    if style in [
+        "逃",
+        "逃げ"
+    ]:
+        score += 0.50
+
+    if style in [
+        "両",
+        "自在"
+    ]:
+        score += 0.35
+
+    if style in [
+        "追",
+        "追込"
+    ]:
+        score += 0.15
+
+
+    # B・Hがあれば積極性評価
+    idx = df[
+        df["rider"] == rider
+    ].index[0]
+
+    if "b" in df.columns:
+
+        role_score_b = zscore(
+            df["b"]
+        ).loc[idx]
+
+        score += (
+            role_score_b
+            * 0.10
+        )
+
+    if "h" in df.columns:
+
+        role_score_h = zscore(
+            df["h"]
+        ).loc[idx]
+
+        score += (
+            role_score_h
+            * 0.08
+        )
+
+
+    role_score[rider] = score
+
+
+# ==================================================
+# 展開パターン作成
+#
+# 先行
+# 捲り
+# 番手差し
+# 混戦
+# ==================================================
+
+styles = [
+
+    "先行",
+    "捲り",
+    "番手",
+    "混戦"
+
+]
+
+
+style_weights = {
+
+    "先行": 0.28,
+
+    "捲り": 0.27,
+
+    "番手": 0.27,
+
+    "混戦": 0.18
+
 }
 
 
-# ==============================
-# 三連単全通りを評価
-#
-# 重要：
-# 1着だけに極端に偏らない
-# ==============================
+# ==================================================
+# 展開別 三連単評価
+# ==================================================
 
 rows = []
 
-for a, b, c in itertools.permutations(riders, 3):
 
-    first_factor = prob_map[a] ** 0.48
+for first, second, third in itertools.permutations(
+    riders,
+    3
+):
 
-    second_factor = (
-        0.55 * ability[b]
-        + 0.45 * prob_map[b]
-    ) ** 0.31
-
-    third_factor = (
-        0.70 * ability[c]
-        + 0.30 * prob_map[c]
-    ) ** 0.21
+    total_score = 0
 
 
-    # 2番手・3番手からの逆転も自然に評価
-    parity_bonus = 1.0
+    for race_style in styles:
 
-    if prob_map[b] > prob_map[a] * 0.90:
-        parity_bonus *= 1.05
-
-    if prob_map[c] > prob_map[a] * 0.95:
-        parity_bonus *= 1.03
+        score = 0
 
 
-    model_score = (
-        first_factor
-        * second_factor
-        * third_factor
-        * parity_bonus
+        # --------------------------
+        # 基礎能力
+        # --------------------------
+
+        score += (
+            prob_map[first]
+            * 0.52
+        )
+
+        score += (
+            prob_map[second]
+            * 0.30
+        )
+
+        score += (
+            prob_map[third]
+            * 0.18
+        )
+
+
+        # --------------------------
+        # 先行展開
+        # --------------------------
+
+        if race_style == "先行":
+
+            if line_front.get(
+                first
+            ) == first:
+
+                score += 0.20
+
+            if role_score.get(
+                first,
+                0
+            ) > 0.25:
+
+                score += 0.10
+
+            if (
+                second in line_map.get(
+                    first,
+                    []
+                )
+            ):
+                score += 0.10
+
+
+        # --------------------------
+        # 捲り展開
+        # --------------------------
+
+        elif race_style == "捲り":
+
+            style = style_map.get(
+                first,
+                ""
+            )
+
+            if style in [
+                "両",
+                "自在"
+            ]:
+                score += 0.16
+
+            if role_score.get(
+                first,
+                0
+            ) > 0.20:
+
+                score += 0.08
+
+
+        # --------------------------
+        # 番手展開
+        # --------------------------
+
+        elif race_style == "番手":
+
+            first_line = line_map.get(
+                first,
+                []
+            )
+
+            second_line = line_map.get(
+                second,
+                []
+            )
+
+
+            if (
+                first in second_line
+                and len(second_line) >= 2
+            ):
+
+                score += 0.18
+
+
+            if (
+                second in first_line
+            ):
+
+                score += 0.08
+
+
+        # --------------------------
+        # 混戦
+        # --------------------------
+
+        elif race_style == "混戦":
+
+            ability_gap = (
+                prob_map[first]
+                - prob_map[second]
+            )
+
+            if ability_gap < 0.10:
+                score += 0.08
+
+
+        total_score += (
+            score
+            * style_weights[race_style]
+        )
+
+
+    # ==============================================
+    # ライン関係
+    # ==============================================
+
+    first_line = line_map.get(
+        first,
+        [first]
     )
+
+
+    # 同ラインワンツー
+    if second in first_line:
+
+        total_score *= 1.15
+
+
+    # 同ライン123
+    if (
+        second in first_line
+        and third in first_line
+    ):
+
+        total_score *= 1.08
+
+
+    # ==============================================
+    # 2番手・3番手からの逆転
+    #
+    # 1着固定防止
+    # ==============================================
+
+    if (
+        prob_map[second]
+        >= prob_map[first] * 0.80
+    ):
+
+        total_score *= 1.06
+
+
+    if (
+        prob_map[third]
+        >= prob_map[first] * 0.88
+    ):
+
+        total_score *= 1.03
+
 
     rows.append(
         (
-            a,
-            b,
-            c,
-            model_score
+            first,
+            second,
+            third,
+            total_score
         )
     )
 
 
+# ==================================================
+# 三連単ランキング
+# ==================================================
+
 tri = pd.DataFrame(
+
     rows,
+
     columns=[
         "first",
         "second",
         "third",
         "model_score"
     ]
+
 )
 
 
 tri["probability"] = (
+
     tri["model_score"]
     / tri["model_score"].sum()
     * 100
+
 )
 
 
@@ -220,147 +908,236 @@ tri = tri.sort_values(
 
 
 tri["bet"] = (
+
     tri["first"].astype(str)
+
     + "-"
+
     + tri["second"].astype(str)
+
     + "-"
+
     + tri["third"].astype(str)
+
 )
 
 
-# ==============================
-# 自信度から点数決定
+# ==================================================
+# AI自信度
+# ==================================================
+
+sorted_tri = tri[
+    "probability"
+].to_numpy()
+
+
+top_prob = sorted_tri[0]
+
+second_prob = (
+    sorted_tri[1]
+    if len(sorted_tri) > 1
+    else 0
+)
+
+
+spread = (
+    top_prob
+    - second_prob
+)
+
+
+# 上位候補の集中度
+top12_share = (
+    tri.head(12)["probability"]
+    .sum()
+)
+
+
+# ==================================================
+# 点数決定
 #
-# 6〜12点
-# ==============================
+# 自信度が高い → 少ない
+# 混戦 → 多い
+# ==================================================
 
-sorted_probs = prob_df["win_probability"].to_numpy()
+if (
+    top_prob >= 1.80
+    and spread >= 0.35
+):
 
-top1 = sorted_probs[0]
-
-if len(sorted_probs) > 1:
-    top2 = sorted_probs[1]
-else:
-    top2 = 0
-
-gap = top1 - top2
-
-
-if top1 >= 42 and gap >= 15:
     target_points = 6
+    confidence = "★★★★★"
 
-elif top1 >= 34 and gap >= 9:
+elif (
+    top_prob >= 1.40
+    and spread >= 0.20
+):
+
     target_points = 8
+    confidence = "★★★★☆"
 
-elif top1 >= 27 and gap >= 5:
+elif (
+    top_prob >= 1.10
+    and spread >= 0.10
+):
+
     target_points = 10
+    confidence = "★★★☆☆"
 
 else:
+
     target_points = 12
+    confidence = "★★☆☆☆"
 
 
-# ==============================
+# ==================================================
 # 最終買い目選択
 #
-# 重要：
-# 1着固定を優先しない
-# 基本的に複数の1着候補を確保
-# ==============================
+# 1着を基本1〜2人
+# ただし展開が混戦なら自然に広げる
+# ==================================================
 
-pool_size = min(
-    len(tri),
-    max(target_points * 5, 40)
-)
-
-pool = tri.head(pool_size).copy()
+pool = tri.head(
+    min(
+        len(tri),
+        target_points * 6
+    )
+).copy()
 
 
 selected_rows = []
+
 selected_set = set()
 
 
-# 1着候補は基本2人
-first_candidates = (
-    prob_df["rider"]
-    .head(min(3, len(prob_df)))
+# ==================================================
+# 1着候補
+# ==================================================
+
+first_rank = (
+
+    tri.groupby("first")
+    ["model_score"]
+
+    .sum()
+
+    .sort_values(
+        ascending=False
+    )
+
+)
+
+
+top_firsts = (
+    first_rank
+    .head(3)
+    .index
     .tolist()
 )
 
 
-# ==============================
-# まず上位2人を1着に入れる
-# ==============================
+# ==================================================
+# まず1着候補を確保
+# ==================================================
 
-for r in first_candidates[:2]:
+if target_points <= 8:
 
-    sub = pool[
-        pool["first"] == r
+    required_firsts = top_firsts[:2]
+
+else:
+
+    required_firsts = top_firsts[:3]
+
+
+for first in required_firsts:
+
+    candidates = pool[
+        pool["first"] == first
     ]
 
-    if len(sub) > 0:
+    if len(candidates) > 0:
 
-        row = sub.iloc[0]
+        row = candidates.iloc[0]
 
         key = (
+
             int(row["first"]),
             int(row["second"]),
             int(row["third"])
+
         )
 
         if key not in selected_set:
 
             selected_rows.append(row)
+
             selected_set.add(key)
 
 
-# ==============================
-# 残りを総合評価順に追加
-# ==============================
+# ==================================================
+# 残りは総合評価順
+# ==================================================
 
 for _, row in pool.iterrows():
 
     key = (
+
         int(row["first"]),
         int(row["second"]),
         int(row["third"])
+
     )
+
 
     if key in selected_set:
         continue
 
+
     selected_rows.append(row)
+
     selected_set.add(key)
+
 
     if len(selected_rows) >= target_points:
         break
 
 
-# ==============================
+# ==================================================
 # 点数不足時
-# ==============================
+# ==================================================
 
 if len(selected_rows) < target_points:
 
     for _, row in tri.iterrows():
 
         key = (
+
             int(row["first"]),
             int(row["second"]),
             int(row["third"])
+
         )
+
 
         if key not in selected_set:
 
             selected_rows.append(row)
+
             selected_set.add(key)
+
 
         if len(selected_rows) >= target_points:
             break
 
 
+# ==================================================
+# 最終買い目
+# ==================================================
+
 selected_df = pd.DataFrame(
     selected_rows
 )
+
 
 selected_df = selected_df.sort_values(
     "model_score",
@@ -368,211 +1145,211 @@ selected_df = selected_df.sort_values(
 ).reset_index(drop=True)
 
 
-# ==============================
-# AI三連単ランキング
-# ==============================
-
-st.subheader("🔥 AI三連単ランキング")
-
-for i, r in tri.head(12).iterrows():
-
-    st.write(
-        f"**{i + 1:02d}. {r['bet']}**　"
-        f"{r['probability']:.2f}%"
-    )
-
-
-# ==============================
-# 最終買い目
-# ==============================
-
-st.subheader(
-    f"💰 最終{target_points}点"
-)
-
-for i, r in selected_df.iterrows():
-
-    st.write(
-        f"{i + 1}. **{r['bet']}**"
-    )
-
-
-# ==============================
-# フォーメーション化
+# ==================================================
+# フォーメーション変換
 #
-# 選んだ買い目と完全一致する形だけ
-# 採用する
-#
-# 余計な買い目を増やさない
-# ==============================
+# 選んだ買い目以外を勝手に増やさない
+# ==================================================
 
 selected = {
 
     (
-        int(r["first"]),
-        int(r["second"]),
-        int(r["third"])
+
+        int(row["first"]),
+        int(row["second"]),
+        int(row["third"])
+
     )
 
-    for _, r in selected_df.iterrows()
+    for _, row in selected_df.iterrows()
+
 }
 
 
-def valid_rect(
-    a_set,
-    b_set,
-    c_set,
+def make_label(values):
+
+    return "".join(
+
+        str(x)
+
+        for x in sorted(values)
+
+    )
+
+
+def get_combo_count(
+    firsts,
+    seconds,
+    thirds
+):
+
+    combos = set()
+
+
+    for a in firsts:
+
+        for b in seconds:
+
+            for c in thirds:
+
+                if len(
+                    {a, b, c}
+                ) == 3:
+
+                    combos.add(
+                        (a, b, c)
+                    )
+
+
+    return combos
+
+
+def find_best_formation(
     remaining
 ):
 
-    combos = {
-
-        (a, b, c)
-
-        for a in a_set
-        for b in b_set
-        for c in c_set
-
-        if len({a, b, c}) == 3
-    }
-
-    if not combos:
-        return None
-
-    if combos.issubset(remaining):
-        return combos
-
-    return None
-
-
-def set_label(values):
-
-    return "".join(
-        str(x)
-        for x in sorted(values)
-    )
-
-
-def search_best_rectangle(remaining):
-
     first_values = sorted(
-        {x[0] for x in remaining}
+        {
+            x[0]
+            for x in remaining
+        }
     )
+
 
     second_values = sorted(
-        {x[1] for x in remaining}
+        {
+            x[1]
+            for x in remaining
+        }
     )
 
+
     third_values = sorted(
-        {x[2] for x in remaining}
+        {
+            x[2]
+            for x in remaining
+        }
     )
 
 
     best = None
-    best_key = None
+    best_score = None
 
 
-    # 1着複数を優先
-    for ka in range(
+    for fa in range(
         1,
         min(3, len(first_values)) + 1
     ):
 
-        for aset in itertools.combinations(
+        for firsts in itertools.combinations(
             first_values,
-            ka
+            fa
         ):
 
-            for kb in range(
+            for sa in range(
                 1,
-                min(3, len(second_values)) + 1
+                min(4, len(second_values)) + 1
             ):
 
-                for bset in itertools.combinations(
+                for seconds in itertools.combinations(
                     second_values,
-                    kb
+                    sa
                 ):
 
-                    for kc in range(
+                    for ta in range(
                         1,
-                        min(4, len(third_values)) + 1
+                        min(5, len(third_values)) + 1
                     ):
 
-                        for cset in itertools.combinations(
+                        for thirds in itertools.combinations(
                             third_values,
-                            kc
+                            ta
                         ):
 
-                            rect = valid_rect(
-                                aset,
-                                bset,
-                                cset,
+                            combos = get_combo_count(
+                                firsts,
+                                seconds,
+                                thirds
+                            )
+
+
+                            if len(combos) < 2:
+                                continue
+
+
+                            if not combos.issubset(
                                 remaining
-                            )
-
-                            if rect is None:
-                                continue
-
-                            size = len(rect)
-
-                            if size < 2:
+                            ):
                                 continue
 
 
-                            # 1着複数を優先
-                            multi_first_bonus = (
+                            # 複数の1着を優先
+                            first_bonus = (
+
                                 2
-                                if len(aset) >= 2
+                                if len(firsts) >= 2
                                 else 0
+
                             )
 
-                            multi_second_bonus = (
+
+                            second_bonus = (
+
                                 1
-                                if len(bset) >= 2
+                                if len(seconds) >= 2
                                 else 0
-                            )
 
-                            compact_penalty = (
-                                len(aset)
-                                + len(bset)
-                                + len(cset)
                             )
 
 
-                            key = (
+                            compactness = (
 
-                                size,
+                                len(firsts)
+                                + len(seconds)
+                                + len(thirds)
 
-                                multi_first_bonus,
+                            )
 
-                                multi_second_bonus,
 
-                                -compact_penalty
+                            score = (
+
+                                len(combos),
+
+                                first_bonus,
+
+                                second_bonus,
+
+                                -compactness
+
                             )
 
 
                             if (
-                                best_key is None
-                                or key > best_key
+                                best_score is None
+                                or score > best_score
                             ):
 
-                                best_key = key
+                                best_score = score
 
                                 best = (
-                                    tuple(aset),
-                                    tuple(bset),
-                                    tuple(cset),
-                                    rect
+
+                                    firsts,
+
+                                    seconds,
+
+                                    thirds,
+
+                                    combos
+
                                 )
 
 
     return best
 
 
-# ==============================
-# 選んだ買い目を
-# フォーメーションに変換
-# ==============================
+# ==================================================
+# フォーメーション生成
+# ==================================================
 
 remaining = set(selected)
 
@@ -581,92 +1358,205 @@ formations = []
 
 while remaining:
 
-    best = search_best_rectangle(
+    best = find_best_formation(
         remaining
     )
 
 
-    # フォーメーション化できない場合
     if best is None:
 
-        x = max(
-
-            remaining,
-
-            key=lambda t: float(
-
-                selected_df[
-
-                    (
-                        selected_df["first"] == t[0]
-                    )
-
-                    &
-
-                    (
-                        selected_df["second"] == t[1]
-                    )
-
-                    &
-
-                    (
-                        selected_df["third"] == t[2]
-                    )
-
-                ]["model_score"].iloc[0]
-
-            )
-
+        item = next(
+            iter(remaining)
         )
 
 
         formations.append(
 
             (
-                "single",
 
-                (x[0],),
+                (item[0],),
 
-                (x[1],),
+                (item[1],),
 
-                (x[2],),
+                (item[2],),
 
-                {x}
+                {item}
 
             )
 
         )
 
-        remaining.remove(x)
+
+        remaining.remove(
+            item
+        )
 
 
     else:
 
-        aset, bset, cset, rect = best
+        firsts, seconds, thirds, combos = best
+
 
         formations.append(
 
             (
-                "rect",
 
-                aset,
+                firsts,
 
-                bset,
+                seconds,
 
-                cset,
+                thirds,
 
-                rect
+                combos
 
             )
 
         )
 
-        remaining -= rect
+
+        remaining -= combos
 
 
-# ==============================
-# 最終フォーメーション表示
-# ==============================
+# ==================================================
+# 表示
+# ==================================================
+
+st.subheader("📊 使用データ")
+
+
+used_data = pd.DataFrame({
+
+    "項目": list(
+        weights_used.keys()
+    ),
+
+    "重要度": list(
+        weights_used.values()
+    )
+
+})
+
+
+st.dataframe(
+    used_data,
+    use_container_width=True
+)
+
+
+st.subheader("🎯 AI 1着評価")
+
+
+prob_df = pd.DataFrame({
+
+    "車番": riders,
+
+    "総合AI評価": [
+
+        eval_map[r]
+        for r in riders
+
+    ],
+
+    "1着確率": [
+
+        prob_map[r] * 100
+        for r in riders
+
+    ],
+
+    "ライン人数": [
+
+        line_size.get(r, 1)
+        for r in riders
+
+    ],
+
+    "脚質": [
+
+        style_map.get(r, "")
+        for r in riders
+
+    ]
+
+})
+
+
+prob_df = prob_df.sort_values(
+    "1着確率",
+    ascending=False
+)
+
+
+st.dataframe(
+
+    prob_df.style.format({
+
+        "総合AI評価": "{:.3f}",
+
+        "1着確率": "{:.2f}%"
+
+    }),
+
+    use_container_width=True
+
+)
+
+
+# ==================================================
+# 自信度
+# ==================================================
+
+st.subheader("🔥 AI自信度")
+
+st.write(
+    f"### {confidence}"
+)
+
+st.write(
+    f"最終買い目：**{target_points}点**"
+)
+
+
+# ==================================================
+# 三連単ランキング
+# ==================================================
+
+st.subheader("🏆 三連単ランキング")
+
+
+for i, row in tri.head(15).iterrows():
+
+    st.write(
+
+        f"**{i + 1}. "
+        f"{row['bet']}**　"
+        f"{row['probability']:.2f}%"
+
+    )
+
+
+# ==================================================
+# 最終買い目
+# ==================================================
+
+st.subheader(
+    f"💰 最終買い目 {target_points}点"
+)
+
+
+for i, row in selected_df.iterrows():
+
+    st.write(
+
+        f"{i + 1}. "
+        f"**{row['bet']}**"
+
+    )
+
+
+# ==================================================
+# 最終フォーメーション
+# ==================================================
 
 st.subheader(
     "🧩 最終フォーメーション"
@@ -676,92 +1566,78 @@ st.subheader(
 total_points = 0
 
 
-for (
-    kind,
-    aset,
-    bset,
-    cset,
-    rect
-) in formations:
-
+for firsts, seconds, thirds, combos in formations:
 
     label = (
-        f"{set_label(aset)}-"
-        f"{set_label(bset)}-"
-        f"{set_label(cset)}"
+
+        f"{make_label(firsts)}"
+
+        f"-"
+
+        f"{make_label(seconds)}"
+
+        f"-"
+
+        f"{make_label(thirds)}"
+
     )
 
 
-    count = len(rect)
+    count = len(combos)
 
     total_points += count
 
 
     st.write(
-        f"**{label}**　→ {count}点"
+
+        f"### {label}　"
+
+        f"**{count}点**"
+
     )
 
 
 st.caption(
+
     f"フォーメーション合計："
     f"{total_points}点"
-    f"（最終{target_points}点と一致）"
+
 )
 
 
-# ==============================
+# ==================================================
 # 最終結論
-# ==============================
+# ==================================================
 
 st.success("予想完了！")
-
-
-firsts = sorted(
-    selected_df["first"]
-    .unique()
-    .tolist()
-)
-
-
-seconds = sorted(
-    selected_df["second"]
-    .unique()
-    .tolist()
-)
-
-
-thirds = sorted(
-    selected_df["third"]
-    .unique()
-    .tolist()
-)
 
 
 st.subheader("🏁 最終結論")
 
 
-st.write(
+final_text = "　".join(
 
-    f"**"
+    [
 
-    f"1着候補："
-    f"{''.join(map(str, firsts))}　"
+        f"{make_label(firsts)}-"
+        f"{make_label(seconds)}-"
+        f"{make_label(thirds)}"
 
-    f"2着候補："
-    f"{''.join(map(str, seconds))}　"
+        for firsts, seconds, thirds, combos
 
-    f"3着候補："
-    f"{''.join(map(str, thirds))}"
+        in formations
 
-    f"**"
+    ]
 
 )
 
 
+st.write(
+    f"## {final_text}"
+)
+
+
 st.info(
-
-    "AIは入力データを統計的に評価した参考予想です。"
-
-    "的中を保証するものではありません。"
-
+    "CSVに存在するデータを自動検出して総合評価します。"
+    "ただし、CSVに入っていない情報は自動では判断できません。"
 )

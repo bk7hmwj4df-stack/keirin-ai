@@ -1,195 +1,37 @@
 # -*- coding: utf-8 -*-
 
-import os
-import base64
 import streamlit as st
-from openai import OpenAI
+from itertools import permutations
+import re
 
 # ==========================================
 # ページ設定
 # ==========================================
 
 st.set_page_config(
-    page_title="競輪AI ガチ分析版",
+    page_title="競輪AI 無料分析版",
     page_icon="🚴",
     layout="wide",
 )
 
-st.title("🚴 競輪AI ガチ分析版")
-
+st.title("🚴 競輪AI 完全無料版")
 st.caption(
-    "スクショや出走表を入力すると、AIが過去成績・近況・脚質・ライン・展開を分析して三連単フォーメーションを作成します。"
+    "API・クレジット不要。選手データとライン情報から三連単を自動分析します。"
 )
 
 # ==========================================
-# APIキー取得
+# 説明
 # ==========================================
 
-api_key = ""
-
-try:
-    api_key = st.secrets["OPENAI_API_KEY"]
-except Exception:
-    api_key = os.getenv("OPENAI_API_KEY", "")
-
-api_key = str(api_key).strip()
-
-if not api_key:
-    st.error("OPENAI_API_KEY が設定されていません。")
-    st.stop()
-
-# OpenAIクライアント
-client = OpenAI(
-    api_key=api_key,
-    timeout=120.0,
-    max_retries=2,
+st.info(
+    "完全無料版：OpenAI APIは使用しません。"
+    "入力されたデータを点数化し、能力・近況・脚質・ライン・展開を考慮して"
+    "三連単フォーメーションを作成します。"
 )
 
 # ==========================================
-# AIへの指示
+# レース情報
 # ==========================================
-
-SYSTEM_PROMPT = """
-あなたは競輪の三連単予想を専門にする高度な競輪データ分析AIです。
-
-目的は、単純な競走得点順・人気順・AI印のコピーではありません。
-
-可能な限りWeb検索を使い、
-実際の選手データとレース展開を分析して、
-最も実戦的な三連単フォーメーションを作成してください。
-
-【必ず確認すること】
-
-・選手の過去成績
-・直近成績
-・直近のレース内容
-・競走得点
-・勝率、連対率、3連対率
-・決まり手
-・S、H、B
-・脚質
-・先行力
-・捲り力
-・追込み能力
-・番手戦の強さ
-・直近の調子
-・ライン構成
-・各ラインの長さ
-・並び
-・主導権争い
-・過去対戦
-・バンク特性
-
-【最重要ルール】
-
-1. 最初にオッズで予想を決めない。
-2. まずデータと展開で評価する。
-3. オッズは最後に参考として見る。
-4. 存在しないデータを作らない。
-5. 不明な情報を事実のように書かない。
-6. 既存AI予想をそのままコピーしない。
-
-【分析手順】
-
-STEP 1
-全選手の能力と近況を評価する。
-
-STEP 2
-ライン構成を分析する。
-
-誰が先頭で、誰が番手で、
-誰が3番手かを確認する。
-
-STEP 3
-最低3パターンの展開を考える。
-
-A：本命ラインが主導権
-B：別線の捲り
-C：先行争いから番手や追込みが浮上
-
-STEP 4
-1着・2着・3着を別々に評価する。
-
-・1着になる可能性
-・2着になる可能性
-・3着になる可能性
-
-をそれぞれ考える。
-
-【フォーメーション作成ルール】
-
-明確な1強でない限り、
-1着候補は原則2人程度にする。
-
-1着と2着を同じ組み合わせで
-固定した買い方を何度も繰り返さない。
-
-例：
-
-1-2-345
-1-2-367
-
-このような1-2固定の繰り返しは禁止。
-
-展開に応じて、
-
-1が1着で2が2着
-2が1着で1が2着
-別の選手が2着に浮上
-
-などを自然に考慮する。
-
-変則的すぎるフォーメーションは避け、
-普通で見やすい実戦的な買い目にする。
-
-【点数】
-
-ユーザーが指定した最大点数を絶対に超えない。
-
-12点なら最大12点。
-20点なら最大20点。
-
-必ず実際に三連単を展開し、
-重複を除いた最終点数を確認する。
-
-【出力形式】
-
-最初に
-
-【AI結論】
-◎ 本命
-○ 対抗
-▲ 単穴
-☆ 穴
-
-次に
-
-【想定展開】
-
-を短く書く。
-
-最後に必ず
-
-【最終フォーメーション】
-
-を出す。
-
-例：
-
-7-13-12356
-1-7-12356
-
-合計：10点
-
-説明の長さよりも、
-最終フォーメーションの精度を最優先する。
-"""
-
-# ==========================================
-# 入力エリア
-# ==========================================
-
-st.divider()
 
 st.subheader("🏁 レース情報")
 
@@ -198,7 +40,7 @@ col1, col2 = st.columns(2)
 with col1:
     race_name = st.text_input(
         "レース名",
-        placeholder="例：高松競輪 5R",
+        placeholder="例：前橋競輪 8R",
     )
 
 with col2:
@@ -210,241 +52,613 @@ with col2:
     )
 
 # ==========================================
-# スクショアップロード
+# 選手データ
 # ==========================================
 
-st.subheader("📸 出走表スクショ（任意）")
+st.subheader("👤 選手データ")
 
-uploaded_images = st.file_uploader(
-    "出走表・予想・直近成績などのスクショをアップロード",
-    type=["png", "jpg", "jpeg", "webp"],
-    accept_multiple_files=True,
+st.caption(
+    "分かる範囲で入力してください。"
+    "競走得点・直近成績・勝率などを参考に入力すると精度が上がります。"
 )
 
-if uploaded_images:
-    st.success(
-        f"{len(uploaded_images)}枚の画像を読み込みました。"
-    )
+riders = []
+
+for i in range(1, 10):
+
+    with st.expander(f"{i}番車"):
+
+        c1, c2, c3, c4 = st.columns(4)
+
+        with c1:
+            name = st.text_input(
+                "選手名",
+                key=f"name_{i}",
+            )
+
+        with c2:
+            score = st.number_input(
+                "競走得点",
+                min_value=0.0,
+                max_value=130.0,
+                value=0.0,
+                step=0.1,
+                key=f"score_{i}",
+            )
+
+        with c3:
+            form = st.slider(
+                "直近の調子",
+                min_value=1,
+                max_value=10,
+                value=5,
+                key=f"form_{i}",
+            )
+
+        with c4:
+            style = st.selectbox(
+                "脚質",
+                [
+                    "追込",
+                    "自在",
+                    "捲り",
+                    "逃げ",
+                    "両方",
+                ],
+                key=f"style_{i}",
+            )
+
+        c5, c6, c7 = st.columns(3)
+
+        with c5:
+            self_power = st.slider(
+                "自力",
+                1,
+                10,
+                5,
+                key=f"self_{i}",
+            )
+
+        with c6:
+            chase_power = st.slider(
+                "追込み",
+                1,
+                10,
+                5,
+                key=f"chase_{i}",
+            )
+
+        with c7:
+            line_position = st.selectbox(
+                "ライン内の位置",
+                [
+                    "単騎",
+                    "先頭",
+                    "番手",
+                    "3番手以降",
+                ],
+                key=f"position_{i}",
+            )
+
+        if name.strip():
+            riders.append(
+                {
+                    "number": i,
+                    "name": name.strip(),
+                    "score": score,
+                    "form": form,
+                    "style": style,
+                    "self_power": self_power,
+                    "chase_power": chase_power,
+                    "position": line_position,
+                }
+            )
 
 # ==========================================
-# テキスト入力
+# ライン入力
 # ==========================================
 
-riders = st.text_area(
-    "出走選手・並び情報",
-    height=300,
+st.subheader("🚴 ライン構成")
+
+line_text = st.text_area(
+    "並び",
+    height=150,
     placeholder="""例：
 
-1 久木原洋
-2 泉慶輔
-3 横関裕樹
-4 島田竜二
-5 佐藤雅春
-6 飯嶋則之
-7 野口裕史
-8 下井竜
-9 角田光
-
-並び：
 7-1-6
 9-5-2
 8-3
+4
 """,
 )
 
-extra_info = st.text_area(
-    "追加情報（任意）",
-    height=200,
-    placeholder="""例：
-
-AI予想：
-◎7
-○1
-▲3
-×5
-
-ラインパワー：
-7-1-6：44.8
-9-5-2：17.0
-8-3：7.4
-""",
-)
-
-st.caption(
-    "スクショだけでも分析できます。"
-    "選手名や並びをテキストでも入力すると精度が上がります。"
-)
-
 # ==========================================
-# 画像変換
+# ライン解析
 # ==========================================
 
-def make_image_content(uploaded_file):
+def parse_lines(text):
 
-    image_bytes = uploaded_file.getvalue()
+    lines = []
 
-    mime_type = uploaded_file.type
+    for line in text.splitlines():
 
-    if not mime_type:
-        mime_type = "image/jpeg"
+        line = line.strip()
 
-    image_base64 = base64.b64encode(
-        image_bytes
-    ).decode("utf-8")
+        if not line:
+            continue
+
+        nums = re.findall(r"\d+", line)
+
+        nums = [
+            int(x)
+            for x in nums
+            if 1 <= int(x) <= 9
+        ]
+
+        if nums:
+            lines.append(nums)
+
+    return lines
+
+
+# ==========================================
+# ライン評価
+# ==========================================
+
+def get_line_bonus(rider, lines):
+
+    number = rider["number"]
+
+    for line in lines:
+
+        if number not in line:
+            continue
+
+        index = line.index(number)
+
+        if index == 0:
+
+            return {
+                "first": 5,
+                "second": 1,
+                "third": 1,
+            }
+
+        if index == 1:
+
+            return {
+                "first": 6,
+                "second": 9,
+                "third": 6,
+            }
+
+        if index >= 2:
+
+            return {
+                "first": 2,
+                "second": 5,
+                "third": 9,
+            }
 
     return {
-        "type": "input_image",
-        "image_url": (
-            f"data:{mime_type};base64,{image_base64}"
-        ),
+        "first": 3,
+        "second": 3,
+        "third": 3,
     }
 
+
 # ==========================================
-# 分析実行
+# 各着順の評価
+# ==========================================
+
+def evaluate_rider(rider, lines):
+
+    score_base = rider["score"]
+
+    if score_base > 0:
+        score_base = (score_base - 70) * 2
+    else:
+        score_base = 10
+
+    score_base = max(0, score_base)
+
+    form = rider["form"] * 4
+    self_power = rider["self_power"] * 4
+    chase_power = rider["chase_power"] * 4
+
+    line_bonus = get_line_bonus(
+        rider,
+        lines,
+    )
+
+    style = rider["style"]
+
+    first = (
+        score_base
+        + form
+        + self_power
+        + line_bonus["first"]
+    )
+
+    second = (
+        score_base
+        + form
+        + (self_power * 0.6)
+        + chase_power
+        + line_bonus["second"]
+    )
+
+    third = (
+        score_base
+        + form
+        + (self_power * 0.4)
+        + (chase_power * 1.2)
+        + line_bonus["third"]
+    )
+
+    if style == "逃げ":
+
+        first += 8
+
+        second += 2
+
+    elif style == "捲り":
+
+        first += 7
+
+        second += 4
+
+    elif style == "自在":
+
+        first += 5
+
+        second += 6
+
+        third += 4
+
+    elif style == "追込":
+
+        first += 2
+
+        second += 8
+
+        third += 10
+
+    elif style == "両方":
+
+        first += 6
+
+        second += 5
+
+        third += 4
+
+    return {
+        "first": first,
+        "second": second,
+        "third": third,
+    }
+
+
+# ==========================================
+# 組み合わせ評価
+# ==========================================
+
+def combination_score(a, b, c, evaluations):
+
+    return (
+        evaluations[a]["first"]
+        + evaluations[b]["second"]
+        + evaluations[c]["third"]
+    )
+
+
+# ==========================================
+# フォーメーション変換
+# ==========================================
+
+def make_formation(combos):
+
+    if not combos:
+        return []
+
+    remaining = combos.copy()
+
+    formations = []
+
+    while remaining:
+
+        a = remaining[0][0]
+
+        same_first = [
+            x for x in remaining
+            if x[0] == a
+        ]
+
+        second_numbers = sorted(
+            set(
+                x[1]
+                for x in same_first
+            )
+        )
+
+        third_numbers = sorted(
+            set(
+                x[2]
+                for x in same_first
+            )
+        )
+
+        second_text = "".join(
+            str(x)
+            for x in second_numbers
+        )
+
+        third_text = "".join(
+            str(x)
+            for x in third_numbers
+        )
+
+        formation = (
+            f"{a}-{second_text}-{third_text}"
+        )
+
+        formations.append(formation)
+
+        for x in same_first:
+            if x in remaining:
+                remaining.remove(x)
+
+    return formations
+
+
+# ==========================================
+# 分析
 # ==========================================
 
 if st.button(
-    "🔥 AIがガチ分析する",
+    "🔥 無料AIが分析する",
     type="primary",
     use_container_width=True,
 ):
 
-    if not race_name.strip():
-        st.error("レース名を入力してください。")
-        st.stop()
+    if len(riders) < 3:
 
-    if not riders.strip() and not uploaded_images:
         st.error(
-            "出走選手情報を入力するか、スクショをアップロードしてください。"
+            "最低3人以上の選手を入力してください。"
         )
+
         st.stop()
 
-    point_instruction = f"""
-最終買い目は最大{target_points}点まで。
+    lines = parse_lines(line_text)
 
-絶対に{target_points}点を超えない。
+    evaluations = {}
 
-できるだけ{target_points}点に近づける。
+    for rider in riders:
 
-最終出力前に必ず点数を再確認する。
-"""
+        number = rider["number"]
 
-    user_text = f"""
-以下の競輪レースを本気で分析してください。
+        evaluations[number] = evaluate_rider(
+            rider,
+            lines,
+        )
 
-【レース】
-{race_name}
+    # ------------------------------------------
+    # 全組み合わせ
+    # ------------------------------------------
 
-【出走選手・並び】
-{riders}
-
-【追加情報】
-{extra_info}
-
-【点数条件】
-{point_instruction}
-
-重要：
-
-まず可能な限りWeb検索を使い、
-選手の過去成績・近況・走り方を調査してください。
-
-スクショが添付されている場合は、
-画像から出走表、並び、AI印、成績などを読み取ってください。
-
-内部では以下の順番で考えてください。
-
-1. 全選手評価
-2. 過去成績
-3. 直近の調子
-4. 脚質と決まり手
-5. ライン分析
-6. 複数の展開予想
-7. 1着・2着・3着の個別評価
-8. 三連単候補比較
-9. 指定点数への調整
-10. 最終点数を再確認
-
-説明よりも、
-最終フォーメーションの精度を最優先してください。
-"""
-
-    content = [
-        {
-            "type": "input_text",
-            "text": user_text,
-        }
+    numbers = [
+        rider["number"]
+        for rider in riders
     ]
 
-    if uploaded_images:
+    combos = []
 
-        for image in uploaded_images:
-
-            content.append(
-                make_image_content(image)
-            )
-
-    with st.spinner(
-        "過去成績・近況・走り・ライン・展開をAIが分析中..."
+    for combo in permutations(
+        numbers,
+        3,
     ):
 
-        try:
+        score = combination_score(
+            combo[0],
+            combo[1],
+            combo[2],
+            evaluations,
+        )
 
-            response = client.responses.create(
+        combos.append(
+            {
+                "combo": combo,
+                "score": score,
+            }
+        )
 
-                # 安いモデル
-                model="gpt-5.6-luna",
+    # ------------------------------------------
+    # 並び替え
+    # ------------------------------------------
 
-                instructions=SYSTEM_PROMPT,
+    combos = sorted(
+        combos,
+        key=lambda x: x["score"],
+        reverse=True,
+    )
 
-                tools=[
-                    {
-                        "type": "web_search",
+    # ------------------------------------------
+    # 1着固定しすぎ防止
+    # ------------------------------------------
 
-                        # highより少し安くする
-                        "search_context_size": "medium",
-                    }
-                ],
+    selected = []
 
-                input=[
-                    {
-                        "role": "user",
-                        "content": content,
-                    }
-                ],
+    first_counts = {}
+
+    for item in combos:
+
+        combo = item["combo"]
+
+        first = combo[0]
+
+        if first_counts.get(first, 0) >= max(
+            2,
+            target_points // 2,
+        ):
+            continue
+
+        selected.append(item)
+
+        first_counts[first] = (
+            first_counts.get(first, 0) + 1
+        )
+
+        if len(selected) >= target_points:
+            break
+
+    # ------------------------------------------
+    # 足りない場合
+    # ------------------------------------------
+
+    if len(selected) < target_points:
+
+        used = set(
+            item["combo"]
+            for item in selected
+        )
+
+        for item in combos:
+
+            if item["combo"] in used:
+                continue
+
+            selected.append(item)
+
+            if len(selected) >= target_points:
+                break
+
+    # ------------------------------------------
+    # 印
+    # ------------------------------------------
+
+    total_rank = []
+
+    for rider in riders:
+
+        n = rider["number"]
+
+        total = (
+            evaluations[n]["first"]
+            + evaluations[n]["second"]
+            + evaluations[n]["third"]
+        )
+
+        total_rank.append(
+            (
+                n,
+                total,
+                rider["name"],
+            )
+        )
+
+    total_rank.sort(
+        key=lambda x: x[1],
+        reverse=True,
+    )
+
+    # ------------------------------------------
+    # 結果
+    # ------------------------------------------
+
+    st.divider()
+
+    st.subheader("🤖 無料AI分析結果")
+
+    if len(total_rank) >= 1:
+
+        st.write(
+            f"◎ 本命：{total_rank[0][0]}番 "
+            f"{total_rank[0][2]}"
+        )
+
+    if len(total_rank) >= 2:
+
+        st.write(
+            f"○ 対抗：{total_rank[1][0]}番 "
+            f"{total_rank[1][2]}"
+        )
+
+    if len(total_rank) >= 3:
+
+        st.write(
+            f"▲ 単穴：{total_rank[2][0]}番 "
+            f"{total_rank[2][2]}"
+        )
+
+    if len(total_rank) >= 4:
+
+        st.write(
+            f"☆ 穴：{total_rank[3][0]}番 "
+            f"{total_rank[3][2]}"
+        )
+
+    # ------------------------------------------
+    # 展開
+    # ------------------------------------------
+
+    st.subheader("🏁 想定展開")
+
+    if lines:
+
+        for line in lines:
+
+            line_display = "-".join(
+                str(x)
+                for x in line
             )
 
-            answer = response.output_text
+            st.write(
+                f"ライン：{line_display}"
+            )
 
-            st.divider()
+    else:
 
-            st.subheader("🤖 AI ガチ分析結果")
+        st.write(
+            "ライン情報が未入力のため、"
+            "個人データ中心で分析しました。"
+        )
 
-            st.markdown(answer)
+    # ------------------------------------------
+    # 最終買い目
+    # ------------------------------------------
 
-        except Exception as e:
+    st.subheader("🎯 最終フォーメーション")
 
-            error_message = str(e)
+    final_combos = [
+        item["combo"]
+        for item in selected
+    ]
 
-            if "429" in error_message:
+    for combo in final_combos:
 
-                st.error(
-                    "APIの利用上限またはクレジット不足です。"
-                )
+        st.write(
+            f"{combo[0]}-{combo[1]}-{combo[2]}"
+        )
 
-                st.code(error_message)
+    st.success(
+        f"合計：{len(final_combos)}点"
+    )
 
-                st.info(
-                    "OpenAI APIのBillingを確認してください。"
-                )
+    # ------------------------------------------
+    # コピペ用
+    # ------------------------------------------
 
-            else:
+    st.subheader("📋 コピペ用")
 
-                st.error(
-                    "AI分析中にエラーが発生しました。"
-                )
+    copy_text = "\n".join(
+        f"{combo[0]}-{combo[1]}-{combo[2]}"
+        for combo in final_combos
+    )
 
-                st.code(error_message)
+    st.code(
+        copy_text,
+        language=None,
+    )
 
 # ==========================================
 # 注意
@@ -453,6 +667,6 @@ if st.button(
 st.divider()
 
 st.caption(
-    "※AI予想は参考情報です。"
-    "的中を保証するものではありません。"
+    "※完全無料版です。OpenAI APIは使用しません。"
+    "入力データを数値化して予想する補助ツールであり、的中を保証するものではありません。"
 )

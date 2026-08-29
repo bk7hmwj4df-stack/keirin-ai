@@ -1,272 +1,680 @@
 # -*- coding: utf-8 -*-
 
+import re
 import streamlit as st
+from itertools import product
 
-# ==========================================
+# =========================================================
 # ページ設定
-# ==========================================
+# =========================================================
 
 st.set_page_config(
-    page_title="競輪AI ガチ分析版",
+    page_title="🚴 競輪AI フォーメーション予想",
     page_icon="🚴",
     layout="wide",
 )
 
-# ==========================================
-# タイトル
-# ==========================================
-
-st.title("🚴 競輪AI ガチ分析版")
+st.title("🚴 競輪AI ガチフォーメーション予想")
 st.caption(
-    "出走表スクショと選手名・並びを入力して、"
-    "展開から三連単フォーメーションを作成します。"
+    "無料版：選手・並び・競走得点を入力すると、ラインと展開から三連単フォーメーションを自動作成します。"
 )
 
-# ==========================================
-# レース情報
-# ==========================================
+# =========================================================
+# ユーザーの予想ルール
+# =========================================================
 
-st.divider()
+st.info(
+    """
+【予想ルール】
 
-st.subheader("🏁 レース情報")
+・競走得点だけで決めない  
+・ライン構成を重視  
+・先行選手の主導権争いを考える  
+・番手選手の差し切りも評価  
+・1着候補は原則2人程度  
+・1着2着を同じセットで固定しすぎない  
+・普通で見やすいフォーメーション  
+・必ず指定点数以内  
+"""
+)
+
+# =========================================================
+# 基本設定
+# =========================================================
 
 col1, col2 = st.columns(2)
 
 with col1:
     race_name = st.text_input(
         "レース名",
-        placeholder="例：玉野競輪 6R",
+        placeholder="例：高松競輪 5R"
     )
 
 with col2:
     target_points = st.selectbox(
         "買い目点数",
-        list(range(6, 21)),
-        index=7,
-        format_func=lambda x: f"{x}点",
+        options=list(range(6, 21)),
+        index=6,
+        format_func=lambda x: f"{x}点"
     )
 
-# ==========================================
-# スクショ
-# ==========================================
+# =========================================================
+# 簡単入力
+# =========================================================
 
-st.subheader("📸 出走表スクショ")
+st.subheader("🏁 選手データをコピペ")
 
-uploaded_images = st.file_uploader(
-    "出走表・予想・直近成績などのスクショをアップロード",
-    type=["png", "jpg", "jpeg", "webp"],
-    accept_multiple_files=True,
+st.caption("このままコピペでOK。脚質は 逃・両・追 のどれか。")
+
+default_riders = """1 久木原洋 101.61 追
+2 泉慶輔 95.03 追
+3 横関裕樹 101.55 両
+4 島田竜二 94.38 追
+5 佐藤雅春 96.91 追
+6 飯嶋則之 90.76 追
+7 野口裕史 101.53 逃
+8 下井竜 93.18 逃
+9 角田光 95.37 逃"""
+
+riders_text = st.text_area(
+    "選手データ",
+    value=default_riders,
+    height=280
 )
 
-if uploaded_images:
+st.subheader("➡️ 並び")
 
-    st.success(
-        f"📸 {len(uploaded_images)}枚のスクショを読み込みました。"
-    )
-
-    cols = st.columns(min(len(uploaded_images), 3))
-
-    for i, image in enumerate(uploaded_images):
-        with cols[i % len(cols)]:
-            st.image(image, width="stretch")
-
-# ==========================================
-# 選手・並び入力
-# ==========================================
-
-st.subheader("🏃 選手・並び")
-
-riders = st.text_area(
-    "選手名と並びをまとめて入力",
-    height=350,
-    placeholder="""このままコピペでOKです。
-
-1 久木原洋
-2 泉慶輔
-3 横関裕樹
-4 島田竜二
-5 佐藤雅春
-6 飯嶋則之
-7 野口裕史
-8 下井竜
-9 角田光
-
-並び：
+lines_text = st.text_area(
+    "ライン構成",
+    value="""9-5-2
 7-1-6
-9-5-2
-8-3
-""",
+4
+8-3""",
+    height=180
 )
 
-st.info(
-    "💡 競走得点・脚質・自力・追込などを"
-    "1人ずつ入力する必要はありません。"
+st.caption(
+    "例：9-5-2 のように入力。単騎は 4 のように1人だけ入力。"
 )
 
-# ==========================================
-# 追加情報
-# ==========================================
+# =========================================================
+# 直近調子
+# =========================================================
 
-with st.expander("➕ 追加情報（任意）"):
+with st.expander("🔥 直近の調子を調整（任意）"):
 
-    extra_info = st.text_area(
-        "分かる情報があれば入力",
-        height=250,
-        placeholder="""例：
-
-AI予想：
-◎7
-○1
-▲3
-×5
-
-ラインパワー：
-7-1-6：44.8
-9-5-2：17.0
-8-3：7.4
-
-オッズ：
-7-1-6：44.8
-9-5-2：17.0
-""",
+    st.caption(
+        "調子が良い選手は +2、悪い選手は -2 など。"
     )
 
-# ==========================================
-# 無料分析
-# ==========================================
+    form_text = st.text_area(
+        "例：7 +2 / 1 +1 / 3 +2 / 9 -1",
+        placeholder="例：7 +2 / 1 +1 / 3 -1",
+        height=100
+    )
 
-def analyze_race(riders_text, points):
+# =========================================================
+# 選手データ解析
+# =========================================================
 
-    lines = riders_text.splitlines()
+def parse_riders(text):
 
-    numbers = []
+    riders = {}
 
-    for line in lines:
+    for line in text.splitlines():
 
         line = line.strip()
 
         if not line:
             continue
 
-        if len(line) >= 1 and line[0].isdigit():
+        pattern = r"^(\d+)\s+(.+?)\s+(\d+(?:\.\d+)?)\s+([逃両追])"
 
-            num = line[0]
+        match = re.search(pattern, line)
 
-            if num not in numbers:
-                numbers.append(num)
+        if match:
 
-    # 9人そろっていない場合も使えるようにする
-    if len(numbers) < 3:
-        return None
+            number = int(match.group(1))
+            name = match.group(2).strip()
+            score = float(match.group(3))
+            style = match.group(4)
 
-    # まずは入力順を候補にする
-    main = numbers[0]
-    second = numbers[1] if len(numbers) > 1 else main
-    third = numbers[2] if len(numbers) > 2 else second
+            riders[number] = {
+                "number": number,
+                "name": name,
+                "score": score,
+                "style": style,
+            }
 
-    candidates = numbers[:6]
+    return riders
 
-    if len(candidates) < 3:
-        return None
 
-    # シンプルなフォーメーション作成
-    result = []
+# =========================================================
+# ライン解析
+# =========================================================
 
-    # 1着候補を2人程度にする
-    firsts = candidates[:2]
+def parse_lines(text):
 
-    for first in firsts:
-        for second_place in candidates[:4]:
+    lines = []
 
-            if second_place == first:
+    for raw_line in text.splitlines():
+
+        raw_line = raw_line.strip()
+
+        if not raw_line:
+            continue
+
+        numbers = re.findall(r"\d+", raw_line)
+
+        if numbers:
+
+            line = [int(x) for x in numbers]
+
+            lines.append(line)
+
+    return lines
+
+
+# =========================================================
+# 調子解析
+# =========================================================
+
+def parse_form(text):
+
+    form = {}
+
+    matches = re.findall(
+        r"(\d+)\s*([+-]\s*\d+(?:\.\d+)?)",
+        text
+    )
+
+    for number, value in matches:
+
+        value = value.replace(" ", "")
+
+        form[int(number)] = float(value)
+
+    return form
+
+
+# =========================================================
+# 選手能力計算
+# =========================================================
+
+def calculate_ratings(riders, lines, form):
+
+    ratings = {}
+
+    # 得点の範囲を確認
+    scores = [r["score"] for r in riders.values()]
+
+    if not scores:
+        return {}
+
+    min_score = min(scores)
+    max_score = max(scores)
+
+    score_range = max(max_score - min_score, 1)
+
+    for number, rider in riders.items():
+
+        # 競走得点
+        base = (
+            (rider["score"] - min_score)
+            / score_range
+            * 60
+        )
+
+        # 基礎点
+        rating = 40 + base
+
+        # 脚質補正
+        if rider["style"] == "逃":
+            rating += 3
+
+        elif rider["style"] == "両":
+            rating += 4
+
+        elif rider["style"] == "追":
+            rating += 1
+
+        # 調子補正
+        rating += form.get(number, 0) * 3
+
+        ratings[number] = {
+            "base": rating,
+            "first": rating,
+            "second": rating,
+            "third": rating,
+        }
+
+    # -----------------------------------------------------
+    # ライン補正
+    # -----------------------------------------------------
+
+    for line in lines:
+
+        if not line:
+            continue
+
+        for position, number in enumerate(line):
+
+            if number not in ratings:
                 continue
 
-            for third_place in candidates[:6]:
+            rider = riders[number]
 
-                if third_place == first:
-                    continue
+            # 先頭
+            if position == 0:
 
-                if third_place == second_place:
-                    continue
+                if rider["style"] == "逃":
 
-                ticket = f"{first}-{second_place}-{third_place}"
+                    ratings[number]["first"] += 7
+                    ratings[number]["second"] += 3
 
-                if ticket not in result:
-                    result.append(ticket)
+                elif rider["style"] == "両":
 
-                if len(result) >= points:
-                    return result
+                    ratings[number]["first"] += 6
+                    ratings[number]["second"] += 4
 
-    return result[:points]
+                else:
+
+                    ratings[number]["first"] += 2
+
+            # 番手
+            elif position == 1:
+
+                ratings[number]["second"] += 9
+                ratings[number]["first"] += 5
+                ratings[number]["third"] += 6
+
+            # 3番手
+            else:
+
+                ratings[number]["third"] += 8
+                ratings[number]["second"] += 3
+
+        # ラインが長いほど有利
+        if len(line) >= 3:
+
+            for number in line:
+
+                if number in ratings:
+
+                    ratings[number]["second"] += 2
+                    ratings[number]["third"] += 2
+
+    # -----------------------------------------------------
+    # 逃げ選手が複数いる場合
+    # -----------------------------------------------------
+
+    leaders = []
+
+    for line in lines:
+
+        if not line:
+            continue
+
+        first = line[0]
+
+        if (
+            first in riders
+            and riders[first]["style"] in ["逃", "両"]
+        ):
+            leaders.append(first)
+
+    # 先行候補が多いなら番手有利
+    if len(leaders) >= 3:
+
+        for line in lines:
+
+            if len(line) >= 2:
+
+                second = line[1]
+
+                if second in ratings:
+
+                    ratings[second]["first"] += 3
+                    ratings[second]["second"] += 5
+
+    return ratings
 
 
-# ==========================================
-# 分析ボタン
-# ==========================================
+# =========================================================
+# 三連単候補生成
+# =========================================================
+
+def generate_trifecta(ratings, target_points):
+
+    numbers = list(ratings.keys())
+
+    candidates = []
+
+    for a, b, c in product(numbers, repeat=3):
+
+        if len({a, b, c}) < 3:
+            continue
+
+        value = (
+            ratings[a]["first"] * 0.48
+            + ratings[b]["second"] * 0.32
+            + ratings[c]["third"] * 0.20
+        )
+
+        candidates.append(
+            {
+                "ticket": (a, b, c),
+                "value": value
+            }
+        )
+
+    candidates.sort(
+        key=lambda x: x["value"],
+        reverse=True
+    )
+
+    # -----------------------------------------------------
+    # 1着候補を原則2人に絞る
+    # -----------------------------------------------------
+
+    first_rank = sorted(
+        numbers,
+        key=lambda x: ratings[x]["first"],
+        reverse=True
+    )
+
+    first_candidates = first_rank[:2]
+
+    # -----------------------------------------------------
+    # 本命候補を抽出
+    # -----------------------------------------------------
+
+    filtered = []
+
+    for item in candidates:
+
+        a, b, c = item["ticket"]
+
+        if a in first_candidates:
+            filtered.append(item)
+
+    # -----------------------------------------------------
+    # 1着2着固定の繰り返しを避ける
+    # -----------------------------------------------------
+
+    selected = []
+
+    pair_count = {}
+
+    for item in filtered:
+
+        if len(selected) >= target_points:
+            break
+
+        a, b, c = item["ticket"]
+
+        pair = (a, b)
+
+        # 同じ1着2着は最大2回まで
+        if pair_count.get(pair, 0) >= 2:
+            continue
+
+        selected.append(item)
+
+        pair_count[pair] = (
+            pair_count.get(pair, 0) + 1
+        )
+
+    # -----------------------------------------------------
+    # 足りない場合
+    # -----------------------------------------------------
+
+    if len(selected) < target_points:
+
+        for item in filtered:
+
+            if item not in selected:
+
+                selected.append(item)
+
+            if len(selected) >= target_points:
+                break
+
+    return selected[:target_points]
+
+
+# =========================================================
+# フォーメーション形式に変換
+# =========================================================
+
+def format_tickets(tickets):
+
+    if not tickets:
+        return ""
+
+    # 1着ごとに分類
+    groups = {}
+
+    for a, b, c in tickets:
+
+        groups.setdefault(a, [])
+
+        groups[a].append((b, c))
+
+    results = []
+
+    for first, pairs in groups.items():
+
+        second_dict = {}
+
+        for second, third in pairs:
+
+            second_dict.setdefault(second, [])
+
+            second_dict[second].append(third)
+
+        for second, thirds in second_dict.items():
+
+            thirds = sorted(set(thirds))
+
+            third_text = "".join(
+                str(x) for x in thirds
+            )
+
+            results.append(
+                f"{first}-{second}-{third_text}"
+            )
+
+    return results
+
+
+# =========================================================
+# 分析実行
+# =========================================================
 
 if st.button(
-    "🔥 ガチ分析する",
+    "🔥 ガチフォーメーション予想する",
     type="primary",
-    use_container_width=True,
+    use_container_width=True
 ):
+
+    riders = parse_riders(riders_text)
+    lines = parse_lines(lines_text)
+    form = parse_form(form_text)
+
+    if len(riders) < 3:
+
+        st.error(
+            "選手データを最低3人入力してください。"
+        )
+
+        st.stop()
 
     if not race_name.strip():
 
-        st.error("⚠️ レース名を入力してください。")
-        st.stop()
+        race_name = "競輪レース"
 
-    if not riders.strip():
+    # 能力計算
+    ratings = calculate_ratings(
+        riders,
+        lines,
+        form
+    )
 
-        st.error(
-            "⚠️ 選手名と並びを入力してください。"
+    # 三連単生成
+    tickets_data = generate_trifecta(
+        ratings,
+        target_points
+    )
+
+    tickets = [
+        x["ticket"]
+        for x in tickets_data
+    ]
+
+    # =====================================================
+    # 印
+    # =====================================================
+
+    first_rank = sorted(
+        riders.keys(),
+        key=lambda x: ratings[x]["first"],
+        reverse=True
+    )
+
+    second_rank = sorted(
+        riders.keys(),
+        key=lambda x: ratings[x]["second"],
+        reverse=True
+    )
+
+    # =====================================================
+    # 結果表示
+    # =====================================================
+
+    st.divider()
+
+    st.header(f"🔥 {race_name} 最終予想")
+
+    st.subheader("【AI結論】")
+
+    labels = ["◎", "○", "▲", "☆"]
+
+    cols = st.columns(4)
+
+    for i in range(4):
+
+        if i < len(first_rank):
+
+            number = first_rank[i]
+
+            with cols[i]:
+
+                st.metric(
+                    labels[i],
+                    f"{number} {riders[number]['name']}"
+                )
+
+    # -----------------------------------------------------
+    # 選手評価
+    # -----------------------------------------------------
+
+    st.subheader("【選手評価】")
+
+    ranking = sorted(
+        riders.keys(),
+        key=lambda x: ratings[x]["first"],
+        reverse=True
+    )
+
+    for number in ranking:
+
+        rider = riders[number]
+
+        st.write(
+            f"**{number} {rider['name']}** "
+            f"｜得点 {rider['score']} "
+            f"｜脚質 {rider['style']}"
         )
-        st.stop()
 
-    with st.spinner(
-        "選手・ライン・展開を分析中..."
-    ):
+    # -----------------------------------------------------
+    # 展開
+    # -----------------------------------------------------
 
-        result = analyze_race(
-            riders,
-            target_points,
+    st.subheader("【想定展開】")
+
+    if lines:
+
+        main_lines = sorted(
+            lines,
+            key=lambda line: sum(
+                ratings[n]["base"]
+                for n in line
+                if n in ratings
+            ),
+            reverse=True
         )
 
-    if not result:
+        for i, line in enumerate(main_lines):
 
-        st.error(
-            "分析できませんでした。選手番号を3人以上入力してください。"
-        )
+            line_text = "-".join(
+                str(x) for x in line
+            )
 
-    else:
+            if i == 0:
 
-        st.success("🔥 分析完了")
+                st.write(
+                    f"・本線は **{line_text}** が中心"
+                )
 
-        st.divider()
+            elif i == 1:
 
-        st.subheader("🤖 分析結果")
+                st.write(
+                    f"・対抗ライン **{line_text}** の捲り警戒"
+                )
 
-        st.markdown("### 【最終フォーメーション】")
+            else:
 
-        for ticket in result:
-            st.write(f"🏁 {ticket}")
+                st.write(
+                    f"・穴として **{line_text}** も注意"
+                )
 
-        st.markdown(
-            f"### 合計：{len(result)}点"
-        )
+    # -----------------------------------------------------
+    # 買い目
+    # -----------------------------------------------------
 
-        st.divider()
+    st.divider()
 
-        st.caption(
-            "※無料版のため、入力された選手情報・並び・"
-            "スクショを中心に分析します。"
-        )
+    st.header("🎯 最終フォーメーション")
 
-# ==========================================
+    formation = format_tickets(tickets)
+
+    for text in formation:
+
+        st.code(text, language=None)
+
+    st.success(
+        f"合計：{len(tickets)}点"
+    )
+
+    # -----------------------------------------------------
+    # 実際の買い目
+    # -----------------------------------------------------
+
+    with st.expander("実際の買い目を全部確認"):
+
+        for a, b, c in tickets:
+
+            st.write(
+                f"**{a}-{b}-{c}**"
+            )
+
+# =========================================================
 # 注意
-# ==========================================
+# =========================================================
 
 st.divider()
 
 st.caption(
-    "※予想は参考情報です。的中を保証するものではありません。"
+    "※無料版は入力されたデータを基にライン・脚質・競走得点・展開を計算します。"
 )

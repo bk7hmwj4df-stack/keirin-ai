@@ -3,33 +3,17 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(
-    page_title="競輪AI v5",
-    page_icon="🚴",
-    layout="wide"
-)
+st.set_page_config(page_title="競輪AI v5", page_icon="🚴", layout="wide")
 
 st.title("🚴 競輪AI v5")
-st.write(
-    "競輪CSVを読み込み、選手評価→1着確率→三連単候補→"
-    "レース自信度に応じて6〜12点を自動選択します。"
-)
+st.write("選手評価 → 展開考慮 → 三連単評価 → 自信度に応じて6〜12点 → 自然なフォーメーション化")
 
-# =========================================================
-# CSV読み込み
-# =========================================================
-
-uploaded = st.file_uploader(
-    "📁 競輪CSVをアップロード",
-    type=["csv"]
-)
+uploaded = st.file_uploader("📁 競輪CSVをアップロード", type=["csv"])
 
 if uploaded is None:
     st.info("まず競輪データのCSVをアップロードしてください。")
-    st.write(
-        "推奨列：race_id / rider / score / S / H / B / "
-        "recent_win_rate / style / line"
-    )
+    st.write("必須列：rider / score")
+    st.write("任意列：S / H / B / recent_win_rate / style / line")
     st.stop()
 
 try:
@@ -38,9 +22,6 @@ except Exception as e:
     st.error(f"CSVを読み込めませんでした: {e}")
     st.stop()
 
-st.subheader("📊 読み込んだデータ")
-st.dataframe(df, use_container_width=True)
-
 required = ["rider", "score"]
 missing = [c for c in required if c not in df.columns]
 
@@ -48,305 +29,175 @@ if missing:
     st.error("必須列がありません: " + ", ".join(missing))
     st.stop()
 
-# =========================================================
+
+# ==============================
 # データ整形
-# =========================================================
+# ==============================
 
-for c in [
-    "score",
-    "S",
-    "H",
-    "B",
-    "recent_win_rate"
-]:
+for c in ["score", "S", "H", "B", "recent_win_rate"]:
     if c in df.columns:
-        df[c] = pd.to_numeric(
-            df[c],
-            errors="coerce"
-        ).fillna(0)
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
 
-df["rider"] = pd.to_numeric(
-    df["rider"],
-    errors="coerce"
-)
-
-df = df.dropna(
-    subset=["rider"]
-).copy()
-
+df["rider"] = pd.to_numeric(df["rider"], errors="coerce")
+df = df.dropna(subset=["rider"]).copy()
 df["rider"] = df["rider"].astype(int)
-
-if "race_id" not in df.columns:
-    df["race_id"] = "race1"
-
-if "style" not in df.columns:
-    df["style"] = "両"
-
-if "line" not in df.columns:
-    df["line"] = ""
-
-if "recent_win_rate" not in df.columns:
-    df["recent_win_rate"] = 0
 
 if len(df) < 3:
     st.error("3人以上の選手データが必要です。")
     st.stop()
 
-# =========================================================
-# 選手評価
-# =========================================================
+if df["rider"].duplicated().any():
+    st.error("rider列に重複があります。車番は1人につき1つにしてください。")
+    st.stop()
 
-score = df["score"].astype(float)
 
-score_std = (
-    score.std()
-    if score.std() > 0
-    else 1
-)
+st.subheader("📊 読み込んだデータ")
+st.dataframe(df, use_container_width=True)
 
-eval_score = (
-    (score - score.mean())
-    / score_std
-)
 
-# S
+# ==============================
+# Zスコア
+# ==============================
+
+def zscore(s):
+    std = s.std()
+
+    if pd.isna(std) or std == 0:
+        return pd.Series(np.zeros(len(s)), index=s.index)
+
+    return (s - s.mean()) / std
+
+
+# ==============================
+# 選手能力評価
+# ==============================
+
+eval_score = zscore(df["score"]).astype(float)
+
 if "S" in df.columns:
+    eval_score += zscore(df["S"]) * 0.08
 
-    s_std = (
-        df["S"].std()
-        if df["S"].std() > 0
-        else 1
-    )
-
-    eval_score += (
-        (df["S"] - df["S"].mean())
-        / s_std
-    ) * 0.10
-
-# H
 if "H" in df.columns:
+    eval_score += zscore(df["H"]) * 0.10
 
-    h_std = (
-        df["H"].std()
-        if df["H"].std() > 0
-        else 1
-    )
-
-    eval_score += (
-        (df["H"] - df["H"].mean())
-        / h_std
-    ) * 0.12
-
-# B
 if "B" in df.columns:
+    eval_score += zscore(df["B"]) * 0.08
 
-    b_std = (
-        df["B"].std()
-        if df["B"].std() > 0
-        else 1
-    )
+if "recent_win_rate" in df.columns:
+    if df["recent_win_rate"].max() > 0:
+        eval_score += zscore(df["recent_win_rate"]) * 0.18
 
-    eval_score += (
-        (df["B"] - df["B"].mean())
-        / b_std
-    ) * 0.10
+df["ai_eval"] = eval_score
 
-# 最近勝率
-rw = df["recent_win_rate"]
 
-if rw.max() > 0:
-
-    rw_std = (
-        rw.std()
-        if rw.std() > 0
-        else 1
-    )
-
-    eval_score += (
-        (rw - rw.mean())
-        / rw_std
-    ) * 0.18
-
-# 脚質
-style_num = (
-    df["style"]
-    .astype(str)
-    .map({
-        "逃": 3,
-        "先": 3,
-        "両": 2,
-        "捲": 2,
-        "追": 1
-    })
-    .fillna(2)
-)
-
-eval_score += (
-    style_num - style_num.mean()
-) * 0.08
-
-# =========================================================
-# ライン評価
-# =========================================================
-
-df["line_size"] = (
-    df.groupby(
-        ["race_id", "line"]
-    )["rider"]
-    .transform("count")
-)
-
-df["line_score"] = (
-    df.groupby(
-        ["race_id", "line"]
-    )["score"]
-    .transform("sum")
-)
-
-line_mean = df["line_score"].mean()
-
-line_std = (
-    df["line_score"].std()
-    if df["line_score"].std() > 0
-    else 1
-)
-
-eval_score += (
-    (df["line_score"] - line_mean)
-    / line_std
-) * 0.08
-
-# =========================================================
+# ==============================
 # 1着確率
-# =========================================================
+# ==============================
 
-temperature = 1.15
+temperature = 1.25
 
 x = eval_score / temperature
-
-p = np.exp(
-    x - x.max()
-)
-
+p = np.exp(x - x.max())
 p = p / p.sum()
 
+riders = df["rider"].tolist()
+
+prob_map = dict(zip(df["rider"], p))
+eval_map = dict(zip(df["rider"], eval_score))
+
+
 prob_df = pd.DataFrame({
-    "rider": df["rider"],
-    "ai_score": eval_score.round(3),
-    "win_probability": (
-        p * 100
-    ).round(2)
+    "rider": riders,
+    "ai_score": [eval_map[r] for r in riders],
+    "win_probability": [prob_map[r] * 100 for r in riders]
 })
 
 prob_df = prob_df.sort_values(
     "win_probability",
     ascending=False
-)
+).reset_index(drop=True)
+
 
 st.subheader("🎯 AI 1着確率")
 
 st.dataframe(
-    prob_df,
+    prob_df.style.format({
+        "ai_score": "{:.3f}",
+        "win_probability": "{:.2f}%"
+    }),
     use_container_width=True
 )
 
-# =========================================================
-# ライン補正
-# =========================================================
 
-riders = [
-    int(x)
-    for x in df["rider"].tolist()
-]
+# ==============================
+# 能力値を0〜1に正規化
+# ==============================
 
-prob_map = dict(
-    zip(
-        df["rider"],
-        p
-    )
-)
+mn = min(eval_map.values())
+mx = max(eval_map.values())
 
-base = {
-    int(r): float(s)
-    for r, s in zip(
-        df["rider"],
-        eval_score
-    )
-}
-
-mn = min(base.values())
-mx = max(base.values())
-
-span = (
-    mx - mn
-    if mx > mn
-    else 1
-)
+span = mx - mn if mx > mn else 1.0
 
 ability = {
-    r: 0.55 + 0.45 * (
-        (v - mn) / span
-    )
-    for r, v in base.items()
-}
-
-line_bonus = {
-    r: 1.0
+    r: 0.25 + 0.75 * ((eval_map[r] - mn) / span)
     for r in riders
 }
 
-for _, group in df.groupby(
-    ["race_id", "line"]
-):
 
-    members = [
-        int(x)
-        for x in group["rider"].tolist()
-    ]
-
-    if len(members) >= 2:
-
-        bonus = 1.0 + min(
-            0.05,
-            0.015 * (
-                len(members) - 1
-            )
-        )
-
-        for r in members:
-            line_bonus[r] = bonus
-
-# =========================================================
-# 三連単210通り
-# =========================================================
+# ==============================
+# 三連単全通りを評価
+#
+# 重要：
+# 1着だけに極端に偏らない
+# ==============================
 
 rows = []
 
-for a, b, c in itertools.permutations(
-    riders,
-    3
-):
+for a, b, c in itertools.permutations(riders, 3):
+
+    first_factor = prob_map[a] ** 0.48
+
+    second_factor = (
+        0.55 * ability[b]
+        + 0.45 * prob_map[b]
+    ) ** 0.31
+
+    third_factor = (
+        0.70 * ability[c]
+        + 0.30 * prob_map[c]
+    ) ** 0.21
+
+
+    # 2番手・3番手からの逆転も自然に評価
+    parity_bonus = 1.0
+
+    if prob_map[b] > prob_map[a] * 0.90:
+        parity_bonus *= 1.05
+
+    if prob_map[c] > prob_map[a] * 0.95:
+        parity_bonus *= 1.03
+
 
     model_score = (
-        prob_map[a] ** 0.62
-        * ability[b] ** 0.23
-        * ability[c] ** 0.15
-        * line_bonus[a]
-        * line_bonus[b] ** 0.5
+        first_factor
+        * second_factor
+        * third_factor
+        * parity_bonus
     )
 
-    rows.append([
-        f"{a}-{b}-{c}",
-        a,
-        b,
-        c,
-        model_score
-    ])
+    rows.append(
+        (
+            a,
+            b,
+            c,
+            model_score
+        )
+    )
+
 
 tri = pd.DataFrame(
     rows,
     columns=[
-        "bet",
         "first",
         "second",
         "third",
@@ -354,12 +205,6 @@ tri = pd.DataFrame(
     ]
 )
 
-tri = tri.sort_values(
-    "model_score",
-    ascending=False
-).reset_index(
-    drop=True
-)
 
 tri["probability"] = (
     tri["model_score"]
@@ -367,604 +212,556 @@ tri["probability"] = (
     * 100
 )
 
-# =========================================================
-# レース自信度
-# =========================================================
 
-p_sorted = np.sort(
-    p
-)[::-1]
+tri = tri.sort_values(
+    "model_score",
+    ascending=False
+).reset_index(drop=True)
 
-top1 = float(
-    p_sorted[0]
+
+tri["bet"] = (
+    tri["first"].astype(str)
+    + "-"
+    + tri["second"].astype(str)
+    + "-"
+    + tri["third"].astype(str)
 )
 
-top2 = float(
-    p_sorted[:2].sum()
-)
 
-gap = float(
-    p_sorted[0]
-    - p_sorted[1]
-)
+# ==============================
+# 自信度から点数決定
+#
+# 6〜12点
+# ==============================
 
-confidence_score = (
-    top1 * 45
-    + top2 * 30
-    + min(
-        gap * 100,
-        25
-    )
-)
+sorted_probs = prob_df["win_probability"].to_numpy()
 
-# 7車立てなどは少しだけ厳しく
-if len(riders) >= 7:
-    confidence_score -= 3
+top1 = sorted_probs[0]
 
-confidence_score = float(
-    np.clip(
-        confidence_score,
-        0,
-        100
-    )
-)
+if len(sorted_probs) > 1:
+    top2 = sorted_probs[1]
+else:
+    top2 = 0
 
-# =========================================================
-# 自信度 → 点数
-# =========================================================
+gap = top1 - top2
 
-if confidence_score >= 46:
 
-    confidence_label = "★★★"
-    target_n = 7
+if top1 >= 42 and gap >= 15:
+    target_points = 6
 
-elif confidence_score >= 38:
+elif top1 >= 34 and gap >= 9:
+    target_points = 8
 
-    confidence_label = "★★☆"
-    target_n = 9
-
-elif confidence_score >= 31:
-
-    confidence_label = "★☆☆"
-    target_n = 11
+elif top1 >= 27 and gap >= 5:
+    target_points = 10
 
 else:
+    target_points = 12
 
-    confidence_label = "★☆☆"
-    target_n = 12
 
-# 境界を少し変化させる
-if 44 <= confidence_score < 46:
-    target_n = 8
-
-elif 36 <= confidence_score < 38:
-    target_n = 10
-
-# =========================================================
-# AI三連単ランキング
-# =========================================================
-
-st.subheader("🔥 AI三連単ランキング")
-
-for i, row in tri.head(12).iterrows():
-
-    st.write(
-        f"**{i + 1:02d}. {row['bet']}** "
-        f"{row['probability']:.2f}%"
-    )
-
-# =========================================================
+# ==============================
 # 最終買い目選択
-# =========================================================
+#
+# 重要：
+# 1着固定を優先しない
+# 基本的に複数の1着候補を確保
+# ==============================
 
-candidates = []
-
-first_count = {}
-second_count = {}
-
-for i in tri.index:
-
-    row = tri.loc[i]
-
-    first = int(
-        row["first"]
-    )
-
-    second = int(
-        row["second"]
-    )
-
-    penalty = (
-        1
-        + 0.18
-        * first_count.get(
-            first,
-            0
-        )
-        + 0.16
-        * second_count.get(
-            second,
-            0
-        )
-    )
-
-    adjusted_score = (
-        float(row["model_score"])
-        / penalty
-    )
-
-    candidates.append([
-        adjusted_score,
-        i
-    ])
-
-candidates.sort(
-    reverse=True
+pool_size = min(
+    len(tri),
+    max(target_points * 5, 40)
 )
 
-chosen = []
+pool = tri.head(pool_size).copy()
 
-first_count = {}
-second_count = {}
 
-for adjusted_score, i in candidates:
+selected_rows = []
+selected_set = set()
 
-    row = tri.loc[i]
 
-    first = int(
-        row["first"]
-    )
-
-    second = int(
-        row["second"]
-    )
-
-    # 2着が偏りすぎる場合は飛ばす
-    if second_count.get(
-        second,
-        0
-    ) >= max(
-        3,
-        int(
-            np.ceil(
-                target_n / 3
-            )
-        )
-    ):
-        continue
-
-    chosen.append(i)
-
-    first_count[first] = (
-        first_count.get(
-            first,
-            0
-        ) + 1
-    )
-
-    second_count[second] = (
-        second_count.get(
-            second,
-            0
-        ) + 1
-    )
-
-    if len(chosen) >= target_n:
-        break
-
-# 足りなければランキングから補充
-if len(chosen) < target_n:
-
-    for i in tri.index:
-
-        if i not in chosen:
-
-            chosen.append(i)
-
-        if len(chosen) >= target_n:
-            break
-
-top = tri.loc[
-    chosen
-].copy()
-
-# =========================================================
-# 自信度表示
-# =========================================================
-
-st.subheader("🧠 レース自信度")
-
-st.write(
-    f"**{confidence_label}　"
-    f"{confidence_score:.1f}/100　"
-    f"→ 最終{target_n}点**"
+# 1着候補は基本2人
+first_candidates = (
+    prob_df["rider"]
+    .head(min(3, len(prob_df)))
+    .tolist()
 )
 
-# =========================================================
-# 最終買い目
-# =========================================================
 
-st.subheader(
-    f"💰 最終{target_n}点"
-)
+# ==============================
+# まず上位2人を1着に入れる
+# ==============================
 
-for i, (_, row) in enumerate(
-    top.iterrows(),
-    1
-):
+for r in first_candidates[:2]:
 
-    st.write(
-        f"{i}. **{row['bet']}**"
-    )
+    sub = pool[
+        pool["first"] == r
+    ]
 
-# =========================================================
-# フォーメーション化
-# =========================================================
+    if len(sub) > 0:
 
-selected = set()
+        row = sub.iloc[0]
 
-for _, row in top.iterrows():
-
-    selected.add(
-        (
+        key = (
             int(row["first"]),
             int(row["second"]),
             int(row["third"])
         )
+
+        if key not in selected_set:
+
+            selected_rows.append(row)
+            selected_set.add(key)
+
+
+# ==============================
+# 残りを総合評価順に追加
+# ==============================
+
+for _, row in pool.iterrows():
+
+    key = (
+        int(row["first"]),
+        int(row["second"]),
+        int(row["third"])
     )
 
-remaining = set(
-    selected
+    if key in selected_set:
+        continue
+
+    selected_rows.append(row)
+    selected_set.add(key)
+
+    if len(selected_rows) >= target_points:
+        break
+
+
+# ==============================
+# 点数不足時
+# ==============================
+
+if len(selected_rows) < target_points:
+
+    for _, row in tri.iterrows():
+
+        key = (
+            int(row["first"]),
+            int(row["second"]),
+            int(row["third"])
+        )
+
+        if key not in selected_set:
+
+            selected_rows.append(row)
+            selected_set.add(key)
+
+        if len(selected_rows) >= target_points:
+            break
+
+
+selected_df = pd.DataFrame(
+    selected_rows
 )
+
+selected_df = selected_df.sort_values(
+    "model_score",
+    ascending=False
+).reset_index(drop=True)
+
+
+# ==============================
+# AI三連単ランキング
+# ==============================
+
+st.subheader("🔥 AI三連単ランキング")
+
+for i, r in tri.head(12).iterrows():
+
+    st.write(
+        f"**{i + 1:02d}. {r['bet']}**　"
+        f"{r['probability']:.2f}%"
+    )
+
+
+# ==============================
+# 最終買い目
+# ==============================
+
+st.subheader(
+    f"💰 最終{target_points}点"
+)
+
+for i, r in selected_df.iterrows():
+
+    st.write(
+        f"{i + 1}. **{r['bet']}**"
+    )
+
+
+# ==============================
+# フォーメーション化
+#
+# 選んだ買い目と完全一致する形だけ
+# 採用する
+#
+# 余計な買い目を増やさない
+# ==============================
+
+selected = {
+
+    (
+        int(r["first"]),
+        int(r["second"]),
+        int(r["third"])
+    )
+
+    for _, r in selected_df.iterrows()
+}
+
+
+def valid_rect(
+    a_set,
+    b_set,
+    c_set,
+    remaining
+):
+
+    combos = {
+
+        (a, b, c)
+
+        for a in a_set
+        for b in b_set
+        for c in c_set
+
+        if len({a, b, c}) == 3
+    }
+
+    if not combos:
+        return None
+
+    if combos.issubset(remaining):
+        return combos
+
+    return None
+
+
+def set_label(values):
+
+    return "".join(
+        str(x)
+        for x in sorted(values)
+    )
+
+
+def search_best_rectangle(remaining):
+
+    first_values = sorted(
+        {x[0] for x in remaining}
+    )
+
+    second_values = sorted(
+        {x[1] for x in remaining}
+    )
+
+    third_values = sorted(
+        {x[2] for x in remaining}
+    )
+
+
+    best = None
+    best_key = None
+
+
+    # 1着複数を優先
+    for ka in range(
+        1,
+        min(3, len(first_values)) + 1
+    ):
+
+        for aset in itertools.combinations(
+            first_values,
+            ka
+        ):
+
+            for kb in range(
+                1,
+                min(3, len(second_values)) + 1
+            ):
+
+                for bset in itertools.combinations(
+                    second_values,
+                    kb
+                ):
+
+                    for kc in range(
+                        1,
+                        min(4, len(third_values)) + 1
+                    ):
+
+                        for cset in itertools.combinations(
+                            third_values,
+                            kc
+                        ):
+
+                            rect = valid_rect(
+                                aset,
+                                bset,
+                                cset,
+                                remaining
+                            )
+
+                            if rect is None:
+                                continue
+
+                            size = len(rect)
+
+                            if size < 2:
+                                continue
+
+
+                            # 1着複数を優先
+                            multi_first_bonus = (
+                                2
+                                if len(aset) >= 2
+                                else 0
+                            )
+
+                            multi_second_bonus = (
+                                1
+                                if len(bset) >= 2
+                                else 0
+                            )
+
+                            compact_penalty = (
+                                len(aset)
+                                + len(bset)
+                                + len(cset)
+                            )
+
+
+                            key = (
+
+                                size,
+
+                                multi_first_bonus,
+
+                                multi_second_bonus,
+
+                                -compact_penalty
+                            )
+
+
+                            if (
+                                best_key is None
+                                or key > best_key
+                            ):
+
+                                best_key = key
+
+                                best = (
+                                    tuple(aset),
+                                    tuple(bset),
+                                    tuple(cset),
+                                    rect
+                                )
+
+
+    return best
+
+
+# ==============================
+# 選んだ買い目を
+# フォーメーションに変換
+# ==============================
+
+remaining = set(selected)
 
 formations = []
 
+
 while remaining:
 
-    best = None
-    best_gain = 0
-
-    # -----------------------------------------------------
-    # 1着固定 × 2着複数 × 3着複数
-    # -----------------------------------------------------
-
-    first_values = sorted(
-        set(
-            x[0]
-            for x in remaining
-        )
+    best = search_best_rectangle(
+        remaining
     )
 
-    for first in first_values:
 
-        seconds = sorted(
-            set(
-                x[1]
-                for x in remaining
-                if x[0] == first
-            )
-        )
+    # フォーメーション化できない場合
+    if best is None:
 
-        for k2 in range(
-            min(3, len(seconds)),
-            0,
-            -1
-        ):
+        x = max(
 
-            for second_set in itertools.combinations(
-                seconds,
-                k2
-            ):
+            remaining,
 
-                thirds = sorted(
-                    set(
-                        x[2]
-                        for x in remaining
-                        if (
-                            x[0] == first
-                            and x[1]
-                            in second_set
-                        )
+            key=lambda t: float(
+
+                selected_df[
+
+                    (
+                        selected_df["first"] == t[0]
                     )
-                )
 
-                for k3 in range(
-                    min(4, len(thirds)),
-                    0,
-                    -1
-                ):
+                    &
 
-                    for third_set in itertools.combinations(
-                        thirds,
-                        k3
-                    ):
+                    (
+                        selected_df["second"] == t[1]
+                    )
 
-                        rect = set()
+                    &
 
-                        for second in second_set:
+                    (
+                        selected_df["third"] == t[2]
+                    )
 
-                            for third in third_set:
+                ]["model_score"].iloc[0]
 
-                                if len({
-                                    first,
-                                    second,
-                                    third
-                                }) == 3:
-
-                                    rect.add(
-                                        (
-                                            first,
-                                            second,
-                                            third
-                                        )
-                                    )
-
-                        if (
-                            rect
-                            and rect.issubset(
-                                remaining
-                            )
-                            and len(rect)
-                            > best_gain
-                        ):
-
-                            best_gain = len(
-                                rect
-                            )
-
-                            best = (
-                                first,
-                                tuple(
-                                    second_set
-                                ),
-                                tuple(
-                                    third_set
-                                ),
-                                rect
-                            )
-
-    # -----------------------------------------------------
-    # 1着複数 × 2着固定 × 3着複数
-    # -----------------------------------------------------
-
-    if best is None:
-
-        second_values = sorted(
-            set(
-                x[1]
-                for x in remaining
             )
+
         )
 
-        for second in second_values:
-
-            firsts = sorted(
-                set(
-                    x[0]
-                    for x in remaining
-                    if x[1] == second
-                )
-            )
-
-            thirds = sorted(
-                set(
-                    x[2]
-                    for x in remaining
-                    if x[1] == second
-                )
-            )
-
-            for k1 in range(
-                min(3, len(firsts)),
-                0,
-                -1
-            ):
-
-                for first_set in itertools.combinations(
-                    firsts,
-                    k1
-                ):
-
-                    for k3 in range(
-                        min(3, len(thirds)),
-                        0,
-                        -1
-                    ):
-
-                        for third_set in itertools.combinations(
-                            thirds,
-                            k3
-                        ):
-
-                            rect = set()
-
-                            for first in first_set:
-
-                                for third in third_set:
-
-                                    if len({
-                                        first,
-                                        second,
-                                        third
-                                    }) == 3:
-
-                                        rect.add(
-                                            (
-                                                first,
-                                                second,
-                                                third
-                                            )
-                                        )
-
-                            if (
-                                rect
-                                and rect.issubset(
-                                    remaining
-                                )
-                                and len(rect)
-                                > best_gain
-                            ):
-
-                                best_gain = len(
-                                    rect
-                                )
-
-                                best = (
-                                    tuple(
-                                        first_set
-                                    ),
-                                    second,
-                                    tuple(
-                                        third_set
-                                    ),
-                                    rect
-                                )
-
-    # -----------------------------------------------------
-    # 見つからなければ単独買い目
-    # -----------------------------------------------------
-
-    if best is None:
-
-        single = next(
-            iter(remaining)
-        )
 
         formations.append(
+
             (
                 "single",
-                single
+
+                (x[0],),
+
+                (x[1],),
+
+                (x[2],),
+
+                {x}
+
             )
+
         )
 
-        remaining.remove(
-            single
-        )
+        remaining.remove(x)
+
 
     else:
+
+        aset, bset, cset, rect = best
 
         formations.append(
+
             (
                 "rect",
-                best
+
+                aset,
+
+                bset,
+
+                cset,
+
+                rect
+
             )
+
         )
 
-        remaining -= best[3]
+        remaining -= rect
 
-# =========================================================
-# 安全な文字列変換
-# =========================================================
 
-def nums(value):
-
-    if isinstance(
-        value,
-        tuple
-    ):
-
-        return "".join(
-            str(x)
-            for x in sorted(value)
-        )
-
-    return str(value)
-
-# =========================================================
-# フォーメーション表示
-# =========================================================
+# ==============================
+# 最終フォーメーション表示
+# ==============================
 
 st.subheader(
-    f"🧩 最終{target_n}点 "
-    "フォーメーション"
+    "🧩 最終フォーメーション"
 )
 
-formation_points = []
 
-for item in formations:
+total_points = 0
 
-    kind = item[0]
 
-    if kind == "single":
+for (
+    kind,
+    aset,
+    bset,
+    cset,
+    rect
+) in formations:
 
-        combo = item[1]
 
-        bet = "-".join(
-            str(x)
-            for x in combo
-        )
+    label = (
+        f"{set_label(aset)}-"
+        f"{set_label(bset)}-"
+        f"{set_label(cset)}"
+    )
 
-        formation_points.append(
-            (
-                bet,
-                1
-            )
-        )
 
-    else:
+    count = len(rect)
 
-        # ここが重要
-        # item = ("rect", best)
-        # best = (a, b, c, rect)
+    total_points += count
 
-        best = item[1]
-
-        a = best[0]
-        b = best[1]
-        c = best[2]
-        rect = best[3]
-
-        bet = (
-            f"{nums(a)}-"
-            f"{nums(b)}-"
-            f"{nums(c)}"
-        )
-
-        formation_points.append(
-            (
-                bet,
-                len(rect)
-            )
-        )
-
-# 表示
-for bet, count in formation_points:
 
     st.write(
-        f"**{bet}** → {count}点"
+        f"**{label}**　→ {count}点"
     )
 
-# =========================================================
-# 点数チェック
-# =========================================================
 
-formation_total = sum(
-    count
-    for _, count
-    in formation_points
+st.caption(
+    f"フォーメーション合計："
+    f"{total_points}点"
+    f"（最終{target_points}点と一致）"
 )
+
+
+# ==============================
+# 最終結論
+# ==============================
+
+st.success("予想完了！")
+
+
+firsts = sorted(
+    selected_df["first"]
+    .unique()
+    .tolist()
+)
+
+
+seconds = sorted(
+    selected_df["second"]
+    .unique()
+    .tolist()
+)
+
+
+thirds = sorted(
+    selected_df["third"]
+    .unique()
+    .tolist()
+)
+
+
+st.subheader("🏁 最終結論")
+
 
 st.write(
-    f"### 合計：{formation_total}点"
+
+    f"**"
+
+    f"1着候補："
+    f"{''.join(map(str, firsts))}　"
+
+    f"2着候補："
+    f"{''.join(map(str, seconds))}　"
+
+    f"3着候補："
+    f"{''.join(map(str, thirds))}"
+
+    f"**"
+
 )
 
-if formation_total == target_n:
-
-    st.success(
-        f"✅ 最終{target_n}点で一致！"
-    )
-
-else:
-
-    # フォーメーション化が完全にまとまらない場合でも
-    # 買い目自体はtarget_n点を維持
-    st.warning(
-        "フォーメーション表示上の組み合わせ数と"
-        "最終買い目数が一致しません。"
-        "上の「最終買い目」を正として扱ってください。"
-    )
 
 st.info(
+
     "AIは入力データを統計的に評価した参考予想です。"
+
     "的中を保証するものではありません。"
+
 )
